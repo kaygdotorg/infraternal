@@ -15,7 +15,7 @@ test('reviewer: explicit legacy path must satisfy absolute words non-disclosure'
     return r.fulfill({status:401,json:{error:'authorization failed'}});
   });
   await page.goto('/?mock=1&proto=recovery');
-  await page.getByRole('button',{name:'use recovery key',exact:true}).click();
+  await page.getByRole('button',{name:'Use recovery key',exact:true}).click();
   await page.locator('#recovery-username').fill('fixture_owner');
   await page.getByRole('textbox',{name:'Word 1',exact:true}).evaluate(input => {
     const clipboardData=new DataTransfer();
@@ -35,7 +35,7 @@ test('reviewer: preserved deadline remains resumable after server clock rollback
   await page.route('**/auth/session', r => r.fulfill({status:401,json:{}}));
   await page.route('**/auth/recovery-resume', r => r.fulfill({json:{token:'public-rollback-fixture',ready_at:Math.floor(Date.now()/1000)+90000,delay_seconds:90000}}));
   await page.goto('/?mock=1&proto=recovery');
-  await page.getByRole('button',{name:'use recovery key',exact:true}).click();
+  await page.getByRole('button',{name:'Use recovery key',exact:true}).click();
   await page.locator('#recovery-username').fill('fixture_owner');
   await page.getByRole('textbox',{name:'Word 1',exact:true}).evaluate(input => {
     const clipboardData=new DataTransfer();

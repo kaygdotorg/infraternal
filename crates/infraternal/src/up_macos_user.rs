@@ -649,7 +649,7 @@ async fn enroll_and_start(
         let approval = start_approval(server, &body).await?;
         let link = join_approval_link(server, &approval.user_code);
         print_approval(json_output, &short_key, &approval.user_code, &link)?;
-        let invitation = wait_for_approval(server, &approval, host_id, origin, join).await?;
+        let invitation = wait_for_approval(server, &approval, host_id, origin, join, None).await?;
         Ok::<_, Failure>((invitation, key_pkcs8, fingerprint, short_key))
     };
     let (mut invitation, key_pkcs8, fingerprint, short_key) = cancelled

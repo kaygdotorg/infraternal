@@ -351,6 +351,7 @@ async fn verify_completed_recovery_retries(fixture: &RecoveryTlsFixture, recover
         infraternal_plugin_remote::remote_recovery::RecoveryResponse::Certificate { .. } => {
             "certificate"
         }
+        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Retired => "retired",
         infraternal_plugin_remote::remote_recovery::RecoveryResponse::Denied => "denied",
     };
     assert!(

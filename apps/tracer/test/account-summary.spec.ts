@@ -57,7 +57,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     let adds = 0;
     await page.route("**/auth/login-start", (route) => { adds++; return route.fulfill({ status: 503, json: { error: "auth unavailable" } }); });
     await settings.getByRole("button", { name: "Add a second", exact: true }).click();
-    await expect(page.locator(".ui-toast").filter({ hasText: "The passkey could not be added" })).toBeVisible();
+    await expect(page.locator(".ui-toast").filter({ hasText: "Couldn't add this passkey" })).toBeVisible();
     expect(adds).toBe(1);
     passkeys = 2;
     await page.locator("#sidebar-toggle").click();

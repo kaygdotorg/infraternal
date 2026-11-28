@@ -573,7 +573,7 @@ export class Wizard {
       if (status.locked !== false) this.go("authority");
       else { this.authorityReady = true; this.beginBatch(root); }
     } catch (error: unknown) {
-      if (this.alive && !this.closing) this.showError(error instanceof ServiceError ? error.message : "Host connections could not be checked. Try again.");
+      if (this.alive && !this.closing) this.showError(error instanceof ServiceError ? error.message : "Couldn't check host connections. Check your connection and try again.");
     } finally { this.setBusy(false); }
   }
 
@@ -830,13 +830,13 @@ export class Wizard {
     // Retrying a host with leftovers would only find them again, so it is offered "Start fresh" instead.
     const fix = state === "failed" || awaitingKey(job.view) ? guideFor(job.entry.label, job.view.failure).fix : "none";
     // A dead end ("none") has no retry either: it would only meet the same refusal (J314 P2-1).
-    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install" || fix === "none" || fix === "take-over" || fix === "join-command";
+    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install" || fix === "none" || fix === "take-over" || fix === "retire-install" || fix === "join-command";
     // The row tells the news in the page's tone: neutral news is never red here (TASTE: the icon matches the news).
     row.dataset.tone = state === "failed" ? guideFor(job.entry.label, job.view.failure).tone : "";
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
     // The button names what it opens or does.
-    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : fix === "take-over" ? "Take over" : fix === "unlock" ? "Unlock" : fix === "join-command" ? "Review SSH failure" : "Install from the host";
+    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : fix === "take-over" ? "Take over" : fix === "retire-install" ? "Review retirement" : fix === "unlock" ? "Unlock" : fix === "join-command" ? "Review SSH failure" : "Install from the host";
     this.marks.get(job.target)?.set(state);
     // A failure opens its steps so the reason sits next to the step that failed.
     if (state === "failed" && !row.dataset.touched) { row.dataset.open = "true"; row.querySelector(".ah-run-toggle")?.setAttribute("aria-expanded", "true"); }
@@ -902,25 +902,35 @@ export class Wizard {
     if (replaceStuck) guide.fix = "start-fresh";
     // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red. Only a running
     // setup, which the person waits for, gets the clock (TASTE: the icon matches the news, #394).
-    const icon = guide.fix === "start-fresh" || guide.fix === "take-over" || ((guide.fix === "none" || guide.fix === "join-command") && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? (job.view.failure?.kind === "setup_running" ? ICON.pending : ICON.info) : ICON.warning;
+    const icon = guide.fix === "start-fresh" || guide.fix === "take-over" || guide.fix === "retire-install" || ((guide.fix === "none" || guide.fix === "join-command") && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? (job.view.failure?.kind === "setup_running" ? ICON.pending : ICON.info) : ICON.warning;
     // D368 (#433): a Start fresh that closes the stuck setup's own terminals lists each one before consent.
     const closing = guide.fix === "start-fresh" && !replaceStuck ? job.view.failure?.closes?.terminals ?? [] : [];
+    const retirement = guide.fix === "retire-install" ? job.view.failure?.retirement : undefined;
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
       <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${closing.length ? `
       <p class="ah-text" data-terminal-summary>${closing.length === 1 ? "1 open terminal. Start fresh closes it." : `${closing.length} open terminals. Start fresh closes them.`}</p>
-      <div class="ah-keyblock" data-kv></div>` : ""}${this.detailsBlock(job)}`;
+      <div class="ah-keyblock" data-kv></div>` : ""}${retirement?.install ? `<div class="ah-keyblock" data-retirement></div>` : ""}${this.detailsBlock(job)}`;
     if (closing.length) {
       const list = createKeyValueList("The terminals Start fresh closes");
       list.set(closing.map((terminal, index) => ({ key: `Terminal ${index + 1}`, value: takeoverTerminalLabel(terminal) })));
       page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
+    }
+    if (retirement?.install) {
+      const list = createKeyValueList("Paths infraternal will remove");
+      list.set(retirement.paths.map((value) => ({ key: "", value, wide: true })));
+      page.querySelector<HTMLElement>("[data-retirement]")!.append(list.root);
     }
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
     const join = guide.fix === "join-command" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="install"><span>Use infraternal up</span></button>` : "";
     const unlock = guide.fix === "unlock" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="unlock-retry">${svg(ICON.shieldCheck)}<span>Unlock</span></button>` : "";
     const takeOver = guide.fix === "take-over" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="review-take-over"><span>Take over</span></button>` : "";
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${join}${open}${takeOver}${unlock}${guide.fix === "none" || guide.fix === "take-over" || guide.fix === "unlock" || guide.fix === "join-command" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
+    const retire = retirement ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retire-install"><span>${retirement.install ? "Retire and continue" : "Check installation"}</span></button>` : "";
+    const secondary = retirement?.skip_challenge
+      ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="keep-install">${retirement.install ? "Keep earlier installation" : "Continue setup"}</button>`
+      : `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>`;
+    this.setFoot(`${secondary}${install}${join}${open}${takeOver}${unlock}${retire}${retirement || guide.fix === "none" || guide.fix === "take-over" || guide.fix === "unlock" || guide.fix === "join-command" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
     if (closing.length) {
       const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
       if (label) label.textContent = closing.length === 1 ? "Close it and start fresh" : "Close them and start fresh";
@@ -1272,6 +1282,11 @@ export class Wizard {
     else if (action === "retry") { if (this.fixing) this.retryJob(this.fixing); }
     else if (action === "unlock-retry") { if (this.fixing) void this.unlockAndRetry(this.fixing); }
     else if (action === "start-fresh") { if (this.fixing) this.startFresh(this.fixing, this.fixing.view.failure?.closes?.close_challenge); }
+    else if (action === "retire-install" || action === "keep-install") {
+      const offer = this.fixing?.view.failure?.retirement;
+      const challenge = action === "retire-install" ? offer?.challenge : offer?.skip_challenge;
+      if (this.fixing && challenge) this.startFresh(this.fixing, challenge);
+    }
     else if (action === "review-take-over") { if (this.fixing) this.go("takeover"); }
     else if (action === "take-over") { if (this.fixing) this.takeOver(this.fixing); }
     else if (action === "back-failure") this.go("failure", -1);
@@ -1284,7 +1299,7 @@ export class Wizard {
       const job = jobOf();
       // Leftovers are cleared right from the row; every other fix opens its own page. A Take over always asks
       // first, on its own page (D359), and so does a Start fresh that closes terminals, which lists them (D368).
-      if (job) { if (job.view.leftovers && !job.view.failure?.takeover && !job.view.failure?.closes) this.startFresh(job); else this.openFix(job); }
+      if (job) { if (job.view.leftovers && !job.view.failure?.takeover && !job.view.failure?.closes && !job.view.failure?.retirement) this.startFresh(job); else this.openFix(job); }
     }
     else if (action === "toggle-job") {
       const row = target.closest<HTMLElement>(".ah-run");

@@ -39,16 +39,16 @@ for (const size of SIZES) {
       await expect.poll(() => page.locator('section.cl[data-view="docs"]').count(), { timeout: 15_000 }).toBeGreaterThan(0);
       await openPalette(page, "infraternal multiplexer");
       // The Settings wording loads on demand and the palette refreshes when it arrives: wait for the row that competes with the page.
-      await expect(page.locator("#palette-results .result .result-label", { hasText: /^Offer To Switch$/ })).toHaveCount(1);
+      await expect(page.locator("#palette-results .result .result-label", { hasText: /^Offer to switch$/ })).toHaveCount(1);
       const rows = page.locator("#palette-results .result");
       await expect(rows.first()).toContainText("The Infraternal Multiplexer");
       const order = await listed(page);
       expect(order[0], "the Docs group leads").toBe("group:Docs");
-      const offerGroup = groupOfRow(order, "row:Offer To Switch");
+      const offerGroup = groupOfRow(order, "row:Offer to switch");
       expect(offerGroup, "the setting is listed under a group").toBeGreaterThan(0);
       expect(order.indexOf("group:Docs"), "Docs is listed before the group of the setting that mentions the page").toBeLessThan(offerGroup);
       // The Settings row that mentions the page is still offered, just later.
-      await expect(page.locator("#palette-results .result .result-label", { hasText: /^Offer To Switch$/ })).toHaveCount(1);
+      await expect(page.locator("#palette-results .result .result-label", { hasText: /^Offer to switch$/ })).toHaveCount(1);
       await page.keyboard.press("Enter");
       await expect(page.locator('.ui-window[data-window-id="d-terminal/multiplexer"]')).toHaveAttribute("data-active", "");
     });
@@ -60,9 +60,9 @@ for (const size of SIZES) {
       // "switch" begins no page title; it is inside the words of a setting and of the page text.
       await openPalette(page, "offer to switch");
       // Two rows carry that name once everything has loaded: the setting, and the docs heading of the same name (D317).
-      await expect(page.locator("#palette-results .result .result-label", { hasText: /^Offer To Switch$/ })).toHaveCount(2);
+      await expect(page.locator("#palette-results .result .result-label", { hasText: /^Offer to switch$/ })).toHaveCount(2);
       const order = await listed(page);
-      const offerGroup = groupOfRow(order, "row:Offer To Switch");
+      const offerGroup = groupOfRow(order, "row:Offer to switch");
       const docs = order.indexOf("group:Docs");
       expect(offerGroup, "the setting is listed under a group").toBeGreaterThanOrEqual(0);
       if (docs >= 0) expect(offerGroup, "the setting keeps its place ahead of Docs").toBeLessThan(docs);

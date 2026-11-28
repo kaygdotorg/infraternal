@@ -71,7 +71,7 @@ test.describe("desktop 1440×900", () => {
   });
 
   test("the pill sits left of the row's marks and notes, which keep their tooltips (#259)", async ({ page }) => {
-    for (const [id, expected] of [["journal", "New output"], ["bench", "Finished successfully, exit code 0"]] as const) {
+    for (const [id, expected] of [["journal", "New output"], ["bench", "Finished, exit code 0"]] as const) {
       const row = page.locator(`#tree .bm-row:has(.bm-leaf[data-id="s:build-01/${id}"])`);
       const box = (await row.boundingBox())!;
       await page.mouse.move(box.x + 40, box.y + box.height / 2);

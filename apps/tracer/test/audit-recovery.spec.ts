@@ -18,7 +18,7 @@ test('audit recovery words remain inside the browser', async ({ page }) => {
     return route.fulfill({status:401,json:{error:'authorization failed'}});
   });
   await page.goto('/?mock=1&proto=recovery');
-  await page.getByRole('button',{name:'use recovery key',exact:true}).click();
+  await page.getByRole('button',{name:'Use recovery key',exact:true}).click();
   await page.locator('#recovery-username').fill('fixture_owner');
   const phrase = entropyToMnemonic(new Uint8Array(32).fill(1),wordlist);
   await page.getByRole('textbox',{name:'Word 1',exact:true}).evaluate((input,value)=>{
@@ -41,7 +41,7 @@ test('successful verifier path sends no legacy words', async ({ page }) => {
   });
   await page.route('**/auth/recovery-resume', route => route.fulfill({json:{token:'public-upgraded-fixture',ready_at:Math.floor(Date.now()/1000)+3600,delay_seconds:3600}}));
   await page.goto('/?mock=1&proto=recovery');
-  await page.getByRole('button',{name:'use recovery key',exact:true}).click();
+  await page.getByRole('button',{name:'Use recovery key',exact:true}).click();
   await page.locator('#recovery-username').fill('fixture_owner');
   const phrase = entropyToMnemonic(new Uint8Array(32).fill(1),wordlist);
   await page.getByRole('textbox',{name:'Word 1',exact:true}).evaluate((input,value)=>{
@@ -65,7 +65,7 @@ for (const status of [429, 503]) {
     });
     await page.route('**/auth/recovery-resume', route => route.fulfill({status,json:{error:'unavailable'}}));
     await page.goto('/?mock=1&proto=recovery');
-    await page.getByRole('button',{name:'use recovery key',exact:true}).click();
+    await page.getByRole('button',{name:'Use recovery key',exact:true}).click();
     await page.locator('#recovery-username').fill('fixture_owner');
     const phrase = entropyToMnemonic(new Uint8Array(32).fill(1),wordlist);
     await page.getByRole('textbox',{name:'Word 1',exact:true}).evaluate((input,value)=>{

@@ -2,8 +2,7 @@
  * The action pill on a sidebar row (#215): small icon buttons at the row's right end that show while the pointer is on
  * the row or the row has keyboard focus, so Info, Rename and Remove are one glance away without a menu. The pill is the
  * pointer's shortcut to what the row menu (row-actions.on-demand.ts) already offers; it asks the same `actions` the menu does, so
- * a row never shows a button for something it cannot do (a host the Mesh does not know has no Rename; a session cannot
- * be ended until the inventory can, #100).
+ * a row shows just the actions its host or session supports.
  *
  * - Hover only (`hover: hover` and a fine pointer). The pill never covers the row's marks and notes (their tooltips are #259's). A phone has the long-press menu and the swipes, which are the same
  *   actions; a pill would only crowd a 44 px row.

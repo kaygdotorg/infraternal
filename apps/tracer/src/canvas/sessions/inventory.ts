@@ -52,10 +52,11 @@ export type InventoryStatus = "loading" | "ready" | "error";
 /** What an inventory can do; the UI offers only these (a missing verb is not drawn, never greyed out). */
 export interface InventoryCapabilities { rename?: boolean; end?: boolean; runAgain?: boolean; dismiss?: boolean }
 
+/** The host sessions and actions shown by session lists and terminal windows. */
 export interface SessionInventory {
   /** Product membership follows the shared layout; previews may keep local attachment state. */
   setLayout?(document: CanvasDocument): void;
-  /** Absent means everything. The product's client-side inventory (live-inventory.ts) cannot end sessions until #100. */
+  /** Actions available in this inventory. An omitted capability uses the default list behavior. */
   readonly can?: InventoryCapabilities;
   status(): InventoryStatus;
   /** Asks the host again after a failure; resolves when the status has settled. */
@@ -74,8 +75,8 @@ export interface SessionInventory {
   create?(host: string): SessionRecord;
   /** A rename pins the name. */
   rename(host: string, id: string, name: string): void;
-  /** Ends the session (explicit, after the confirmation naming what is running). */
-  end(host: string, id: string): void;
+  /** Ends the session after confirmation and reports whether the host ended it. */
+  end(host: string, id: string): Promise<boolean>;
   /** Starts an exited session's command again (it becomes open). */
   runAgain(host: string, id: string): void;
   /** Removes an exited session's kept screen. */

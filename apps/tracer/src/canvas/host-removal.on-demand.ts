@@ -26,12 +26,12 @@ class RemovalError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
 }
 /** Send a bounded host-management step with the browser session and same-origin checks. */
-async function post<T>(path: string, body: unknown, failure = "The host could not be removed. Try again."): Promise<T> {
+async function post<T>(path: string, body: unknown, failure = "Couldn't remove this host. Check your connection and try again."): Promise<T> {
   const response = await fetch(`/remote/hosts/${path}`, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) throw new RemovalError(response.status === 401 ? "Your session has ended. Sign in again, then try again."
-    : response.status === 403 ? "This request could not be authorised. Refresh the host list and try again."
+    : response.status === 403 ? "Your account doesn't have permission for this host. Refresh the host list and try again."
     : response.status === 429 ? "Too many host removals are running at once. Wait a moment, then try again."
-    : response.status >= 500 ? "The server could not complete this request. Try again." : failure, response.status);
+    : response.status >= 500 ? "Server error while updating this host. Wait a moment and try again." : failure, response.status);
   return await response.json() as T;
 }
 
@@ -79,7 +79,7 @@ async function renewWindow(id: string): Promise<void> {
         // No await before this call: the click itself starts the platform passkey prompt.
         void navigator.credentials.get({ publicKey }).then(async assertion => {
           if (!(assertion instanceof PublicKeyCredential)) throw new Error("Passkey confirmation was cancelled. The host was not removed.");
-          await post("reauth/finish", { host_id: id, ceremony: start.ceremony, proof: auth.credentialProof(assertion) }, "Passkey confirmation could not be verified. Try again.");
+          await post("reauth/finish", { host_id: id, ceremony: start.ceremony, proof: auth.credentialProof(assertion) }, "Couldn't verify your passkey. Try again.");
           resolve();
         }).catch((error: unknown) => reject(error instanceof DOMException
           ? new Error(error.name === "NotAllowedError" ? "Passkey confirmation was cancelled or timed out. The host was not removed." : "This browser could not confirm your passkey. Try again.") : error));
@@ -110,7 +110,7 @@ async function removeReviewed(id: string, name: string): Promise<Result> {
 async function forgetReviewed(id: string, name: string): Promise<{ host_id: string; state: string; message: string }> {
   const seen = renewals;
   const run = (): Promise<{ host_id: string; state: string; message: string }> =>
-    post("forget", { host_id: id }, "The host could not be forgotten. Refresh the list or sign in again, then try again.");
+    post("forget", { host_id: id }, "Couldn't forget this host. Refresh the host list or sign in again, then try again.");
   try { return await run(); }
   catch (error) {
     if (!(error instanceof RemovalError) || error.status !== 428) throw error;
@@ -143,10 +143,10 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
         if (again()) return;
         running.add(id);
         void forgetReviewed(id, name).then((result) => {
-          if (result.host_id !== id || result.state !== "forgotten") throw new Error("Host forgetting could not be confirmed.");
+          if (result.host_id !== id || result.state !== "forgotten") throw new Error("Couldn't confirm that this host was forgotten. Refresh the host list to check its state.");
           removed(id);
           core.toast.show({ message: result.message, duration: 5000 });
-        }).catch((error: unknown) => core.toast.show({ message: error instanceof Error ? error.message : "The host could not be forgotten. Try again.", tone: "error", duration: 6000 })).finally(() => { running.delete(id); });
+        }).catch((error: unknown) => core.toast.show({ message: error instanceof Error ? error.message : "Couldn't forget this host. Check your connection and try again.", tone: "error", duration: 6000 })).finally(() => { running.delete(id); });
       }, returnFocus);
     },
     /**
@@ -168,7 +168,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
         running.add(id);
         try {
           const result = await removeReviewed(id, name);
-          if (!["removed", "pending"].includes(result.state) || result.host_id !== id) throw new Error("Host removal could not be confirmed.");
+          if (!["removed", "pending"].includes(result.state) || result.host_id !== id) throw new Error("Couldn't confirm host removal. Refresh the host list to check its state.");
           if (result.state === "removed") removed(id);
           const manual = result.manual;
           // Pending delivery must keep the same local uninstall action as a completed removal with a leftover installation

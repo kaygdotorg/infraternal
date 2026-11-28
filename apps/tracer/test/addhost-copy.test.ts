@@ -229,3 +229,21 @@ test("terminal rows name their pts, other programs and opening minute", () => {
   expect(takeoverTerminalLabel({ account: "root", program: "vim", since, tty: "pts/4", others: 1 })).toBe(`root, vim on pts/4 and 1 other program, since 9 Nov 2026, ${time}`);
   expect(takeoverTerminalLabel({ account: "root", program: "bash", since, others: 0 })).toBe(`root, bash, since 9 Nov 2026, ${time}`);
 });
+
+/** #623, #598: Mac join-locally, host-key, and fallback failures follow COPY.md rules. */
+test("Mac join-locally, host-key, and fallback copy follow COPY.md", () => {
+  const mac = guideFor("studio-mac", { kind: "install", message: "m", log_tail: [], join_locally: "macos" });
+  expect(mac).toMatchObject({
+    title: "Add studio-mac from the Mac",
+    happened: "SSH sign-in worked, but Macs join from their own terminal.",
+    next: "Run infraternal up on studio-mac to add it.",
+    fix: "join-command",
+    tone: "info",
+  });
+  expect(failureLine({ kind: "host-key", message: "m", log_tail: [] })).toBe("Verify this host's key");
+  expect(guideFor("edge-arm", { kind: "host-key", message: "m", log_tail: [] }).title).toBe("Verify edge-arm's host key");
+  const fallback = guideFor("edge-arm", undefined);
+  expect(fallback.title).toBe("Couldn't finish setting up edge-arm");
+  expect(fallback.happened).toBe("Setup stopped before edge-arm was ready.");
+  expect(fallback.next).toBe("Open Details to see what stopped, or try again.");
+});
