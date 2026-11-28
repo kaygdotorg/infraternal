@@ -1291,6 +1291,14 @@ fn clear_role(
 /// # Errors
 /// Returns an error when the file is unsafe, oversized, unreadable, or malformed.
 pub fn read_policy_file(path: &Path) -> Result<Option<Policy>, PolicyError> {
+    read_policy_file_for_owner(path, 0)
+}
+
+/// Read the marked policy for the owner of a checked installation namespace.
+///
+/// # Errors
+/// Rejects unsafe file metadata, oversized input or a foreign policy marker.
+pub fn read_policy_file_for_owner(path: &Path, owner: u32) -> Result<Option<Policy>, PolicyError> {
     #[cfg(any(test, feature = "test-support"))]
     refuse_live_test_policy(path)?;
     let mut options = OpenOptions::new();
@@ -1303,7 +1311,11 @@ pub fn read_policy_file(path: &Path) -> Result<Option<Policy>, PolicyError> {
         Err(error) => return Err(PolicyError::Io(error)),
     };
     let metadata = file.metadata().map_err(PolicyError::Io)?;
-    if !metadata.is_file() || !safe_policy_owner(&metadata) || metadata.len() > MAX_POLICY_BYTES {
+    #[cfg(unix)]
+    let approved_owner = metadata.uid() == owner && metadata.mode() & 0o022 == 0;
+    #[cfg(not(unix))]
+    let approved_owner = metadata.is_file();
+    if !metadata.is_file() || !approved_owner || metadata.len() > MAX_POLICY_BYTES {
         return Err(PolicyError::UnsafePolicy(path.to_owned()));
     }
     let capacity =

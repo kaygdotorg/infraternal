@@ -96,6 +96,9 @@ fn review_at(root: &Path, owner: u32, caller: u32) -> io::Result<Review> {
             paths.push(entry.path.clone());
         }
     }
+    if journaled_policy(root, &state, owner)?.is_some() {
+        paths.push(root.join(FIREWALL_POLICY));
+    }
     paths.sort_unstable();
     paths.dedup();
     Ok(Review {
@@ -302,22 +305,19 @@ fn remove_entry(
 
 /// Retire the owned agent rules and leave the loader if another role needs it.
 fn clear_firewall(root: &Path, state: &Snapshot) -> io::Result<bool> {
-    let policy = root.join(FIREWALL_POLICY);
-    if existing(&policy)?.is_some() && !state.recorded_inode(&policy) {
-        return Ok(true);
-    }
     #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
     {
         use infraternal_plugin_mesh::host_firewall::{self, HostFirewallPaths};
         let paths = HostFirewallPaths::under(root);
-        if state.recorded_inode(&policy) {
+        if journaled_policy(root, state, 0)?.is_some() {
             host_firewall::clear_installed_agent_rules_at(&paths, None)
                 .map_err(io::Error::other)?;
         }
-        Ok(existing(paths.server_policy_path())?.is_some())
+        Ok(existing(paths.server_policy_path())?.is_some()
+            || existing(paths.agent_policy_path())?.is_some())
     }
     #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
-    if state.recorded_inode(&policy) {
+    if journaled_policy(root, state, 0)?.is_some() {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Use a build with Mesh support to remove the installed host firewall.",
@@ -325,6 +325,22 @@ fn clear_firewall(root: &Path, state: &Snapshot) -> io::Result<bool> {
     } else {
         Ok(false)
     }
+}
+
+/// The live agent atomically rewrites its reserved policy when the Mesh UDP
+/// listener changes. Verify that marked file against the original publication,
+/// even if the current inode differs.
+fn journaled_policy(root: &Path, state: &Snapshot, owner: u32) -> io::Result<Option<PathBuf>> {
+    let path = root.join(FIREWALL_POLICY);
+    if !state.created.iter().any(|entry| entry.path == path) || existing(&path)?.is_none() {
+        return Ok(None);
+    }
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    infraternal_plugin_mesh::host_firewall::read_policy_file_for_owner(&path, owner)
+        .map_err(io::Error::other)?;
+    #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
+    let _ = owner;
+    Ok(Some(path))
 }
 
 #[cfg(test)]
@@ -360,6 +376,16 @@ mod tests {
                 std::os::unix::fs::symlink(SERVICE_BINARY, &path).unwrap();
             } else {
                 fs::write(&path, b"fixture").unwrap();
+            }
+            #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+            if name == FIREWALL_POLICY {
+                use infraternal_plugin_mesh::host_firewall;
+                fs::write(
+                    &path,
+                    host_firewall::serialize_policy_file(&host_firewall::Policy::default())
+                        .unwrap(),
+                )
+                .unwrap();
             }
             journal
                 .record(&path, &fs::symlink_metadata(&path).unwrap(), enrollment)
@@ -450,6 +476,35 @@ mod tests {
             assert!(!trial.join("usr/local/bin/infraternal").is_symlink());
             assert_eq!(fs::read(foreign).unwrap(), b"foreign command");
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An atomic listener update keeps the agent's policy owned without trusting an arbitrary file.
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    #[test]
+    fn linux_up_review_includes_a_rewritten_agent_firewall_policy() {
+        let root = std::env::temp_dir().join(format!("lu-{}", Uuid::new_v4().simple()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let owner = nix::unistd::geteuid().as_raw();
+        installed(&root, owner, Uuid::new_v4());
+        let path = root.join(FIREWALL_POLICY);
+        let previous = path.with_extension("old");
+        fs::rename(&path, &previous).unwrap();
+        fs::copy(&previous, &path).unwrap();
+        let state = journal::inspect(&root, owner).unwrap();
+        assert!(!state.recorded_inode(&path));
+        assert_eq!(
+            journaled_policy(&root, &state, owner).unwrap(),
+            Some(path.clone())
+        );
+        assert!(
+            review_at(&root, owner, owner)
+                .unwrap()
+                .paths
+                .contains(&path)
+        );
+        fs::write(&path, b"foreign policy").unwrap();
+        assert!(journaled_policy(&root, &state, owner).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }
