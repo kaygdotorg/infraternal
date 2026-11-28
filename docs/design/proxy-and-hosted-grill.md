@@ -47,6 +47,8 @@ J20 measured Pingora, Sōzu and rpxy against Traefik on the x86 perf VM. The Rus
 
 R3 paired Caddy and Traefik. Idle RSS was **47.54–47.93 MiB** for Caddy and **93.41–93.97 MiB** for Traefik. At concurrency 512, Caddy reached **12.6–13.2k req/s** at **69.6–73.9 ms p99** and Traefik reached **20.6–23.2k req/s** at **42.2–53.0 ms p99**. Traefik preserved all checked connection types through **6/6 reloads**. Caddy closed existing HTTP/1.1 and HTTP/2 connections in each trial. WebSockets survived with an explicit delay and closed in the separate default-setting trials. Cloudflare DNS-01 also required a custom Caddy build. The owner confirmed on #281 that connection-preserving reloads and on-demand distribution justified selecting Traefik, as D374 A15 records. [R3 measurements](https://git.kayg.org/kayg/infraternal/issues/261#issuecomment-72700) · [Owner answers](https://git.kayg.org/kayg/infraternal/issues/281)
 
+The questions below preserve the options originally put to the owner. See the [owner answers and follow-up](#owner-answers-on-2026-11-28) for the outcome.
+
 ## A. Reverse proxy
 
 ### A1. Who owns public TCP and UDP 443?
@@ -146,3 +148,34 @@ A dedicated instance costs compute, storage, backups and monitoring even when id
 3. Target hosted teams from the start. Make the Enterprise composition and source obligations explicit before committing, and budget for tenant isolation, on-call coverage, access review and incident support before promising service.
 
 If D2 stays in force, the hosting portion ends at B1. A later amendment should name the allowed hosted component, the data it receives, who operates it and the self-hosting path before any product or site copy changes.
+
+## Owner answers on 2026-11-28
+
+Recorded from the owner's answers on [#640](https://git.kayg.org/kayg/infraternal/issues/640).
+
+| Question | Owner answer |
+| --- | --- |
+| A1 | Once infraternal owns the managed Traefik edge, the owner will point the router forwards at the `ssh.kayg.org` VM and change that VM's address from `10.69.0.89` to `10.69.0.99`, taking over the current Traefik host's address. The managed edge replaces the separate host. This describes the intended cutover. |
+| A2 | Agreed. Use DNS-01 first, with HTTP-01 fallback wherever possible. Use publicly trusted certificates for browser HTTPS. No custom browser CA. |
+| A3 | Make it extremely easy to expose a service both privately into the mesh and publicly. The owner asked how the grant can be part of the Add service flow. See the proposal below. |
+| A4 | Agreed to scoped publishing and the three audiences. The owner is considering raising Community to five users as a separate tier decision. D32 and the current Community limit still apply. |
+| A5 | Agreed. The search palette is the universal entry point for Add service. |
+| A6 | Agreed to report the effective route state, preserve a safe prior snapshot on apply failure and fail closed on revocation. |
+| A7 | The owner asked whether the data ever leaves the user. **Proxy metrics, logs, diagnostics and audit records stay on the user's own machines and are never sent to us.** |
+| B1 | Not yet. D2 stays in force and infraternal remains self-hosted. |
+| B2 | If hosting ever happens, the owner likes one microVM per customer, as in calternal, with its own port forward. This is a preference for a future hosting decision. |
+| B3 | Agreed to the proposed operating and edition approach if hosting is approved later. |
+
+For A1, the target layout puts HTTPS on TCP 443 and the QUIC relay on UDP 443 on the same VM. For A2, HTTP-01 requires the CA to reach TCP 80 and applies to exact names. DNS-01 covers wildcard names and works when only 443 is forwarded. The deployment CA's existing relay and mesh roles stay in effect. [ACME challenge types](https://letsencrypt.org/docs/challenge-types/)
+
+### A3 follow-up on Add service grants
+
+The user picks a machine, its service or port, and an audience. Mesh only keeps access to permitted mesh peers. Sign-in required admits authorized people through the HTTPS edge. Public makes the route reachable from the internet. Where the edge needs to cross the mesh, its access to the backend is a separate, narrow grant that the product can create as part of publishing.
+
+1. **Recommended — one confirmation creates both.** Show the actual URL, intended visitors and the permission in plain language, for example “The gateway can reach buildbox on port 3000 only.” For a direct Mesh only route, show which mesh peers can reach the service and omit the gateway grant if the route has no gateway hop. On **Publish**, create the publication and its required gateway grant together. Require the caller to have authority for both. Keep the route closed until both are effective, and clean up the grant created for this publication if applying the route fails. Unpublish or revoke the publication's grant to close the route and remove both. Independent access rules keep their own lifecycle.
+2. Require the owner to select an existing narrow grant. This keeps publication tied to operator-managed rules and forces an extra setup step whenever the service lacks one.
+3. Request approval of the narrow grant as part of Publish when the caller lacks permission. Show who must approve it and keep the route closed while it waits. This can complement option 1 for deployments that require another approver.
+
+### Next approval artifact
+
+Under D171, the orchestrator should own the Add service mockup as a dedicated UI job. Build it inside the real product, behind the prototype flag and using the test double. Show the search palette entry, service or port selection, the three audiences, the single Publish confirmation with its grant and URL, and the service row after publishing. Include pending certificate or approval, ready, blocked or failed with retry, and cancel and unpublish on desktop and phone. The mockup goes to the owner for approval before production wiring. [Design taste](TASTE.md)
