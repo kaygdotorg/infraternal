@@ -58,7 +58,7 @@ export function createAccountSession(env: AccountSessionEnv): AccountSession {
         .catch(() => {
           busy = false;
           changed();
-          env.toast.show({ message: "The passkey could not be added. Reload before trying again.", tone: "error", action: { label: "Reload", onSelect: () => { window.location.reload(); } } });
+          env.toast.show({ message: "Couldn't add this passkey. Reload the page and try again.", tone: "error", action: { label: "Reload", onSelect: () => { window.location.reload(); } } });
         });
     },
     refresh: () => undefined, onChange,

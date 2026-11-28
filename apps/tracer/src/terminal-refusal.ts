@@ -35,7 +35,7 @@ export function terminalRefusal(error: unknown, hostName?: string, remote = fals
         return { message: `${host} couldn't open a shell as ${account}. Check the account on ${host}, then try again.`, sessionList: false, action: "retry" };
       }
       // The host has systemd but was too busy to answer when the login started: asking again usually works.
-      case "probe_timeout": return { message: `${host} was too busy to start a shell just now. Try again in a moment.`, sessionList: false, action: "retry" };
+      case "probe_timeout": return { message: `${host} is too busy to start a shell. Try again in a moment.`, sessionList: false, action: "retry" };
       // A root host without systemd cannot prove a revoked login is gone, so it opens none (D354). Name the two ways
       // that work; the action is a host that can.
       case "no_systemd": return {
@@ -54,5 +54,5 @@ export function terminalRefusal(error: unknown, hostName?: string, remote = fals
       case "unavailable": return { message: `${host} is offline or cannot reach this server. Check its network, then try again.`, sessionList: false, action: "retry" };
     }
   }
-  return { message: "The server could not open this terminal. Try again.", sessionList: false, action: "retry" };
+  return { message: "Couldn't open this terminal. Check your connection and try again.", sessionList: false, action: "retry" };
 }

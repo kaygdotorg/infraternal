@@ -50,7 +50,7 @@ test("sign-in exposes recovery key entry with per-word errors", async ({ page })
   await page.route("**/auth/session", (route) => route.fulfill({ status: 401, json: {} }));
   await page.goto("/?mock=1&proto=recovery");
   await expect.poll(async () => (await page.locator("#use-recovery").boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
-  await page.getByRole("button", { name: "use recovery key", exact: true }).click();
+  await page.getByRole("button", { name: "Use recovery key", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Use your recovery key" })).toBeVisible();
   await page.getByRole("textbox", { name: "Word 1", exact: true }).fill("notaword");
   await expect(page.locator("#recovery-word-error")).toHaveText("1 word is not in the recovery word list.");
@@ -130,7 +130,7 @@ for (const delay of [0, 86400]) {
     } });
     if (delay !== 0) await page.clock.install();
     await page.goto("/?mock=1&proto=recovery");
-    await page.getByRole("button", { name: "use recovery key", exact: true }).click();
+    await page.getByRole("button", { name: "Use recovery key", exact: true }).click();
     await capture(page, info, "enter-words-empty");
     await page.locator("#recovery-username").fill("fixture_owner");
     await paste(page, phrase.split(" ").map((word, i) => `${i + 1}. ${word}`).join("\n"));
@@ -210,7 +210,7 @@ test("pointer recovery step changes glide the fitted pane", async ({ page }) => 
     token: "public-motion-fixture", delay_seconds: 0, ready_at: Math.floor(Date.now() / 1000),
   } }));
   await page.goto("/?mock=1&proto=recovery");
-  await page.getByRole("button", { name: "use recovery key", exact: true }).click();
+  await page.getByRole("button", { name: "Use recovery key", exact: true }).click();
   await page.locator("#recovery-username").fill("fixture_owner");
   await paste(page, phrase);
   await page.getByRole("button", { name: "Start recovery" }).click();
@@ -245,7 +245,7 @@ test("discarded waiting page resumes the original deadline", async ({ page }) =>
   });
   for (let attempt = 0; attempt < 2; attempt++) {
     await page.goto("/?mock=1&proto=recovery");
-    await page.getByRole("button", { name: "use recovery key", exact: true }).click();
+    await page.getByRole("button", { name: "Use recovery key", exact: true }).click();
     await page.locator("#recovery-username").fill("fixture_owner");
     await paste(page, phrase);
     await page.getByRole("button", { name: "Start recovery" }).click();
@@ -289,7 +289,7 @@ test("remaining recovery wait uses server duration with a skewed browser clock",
     token: "public-clock-fixture", ready_at: Math.floor(serverNow / 1000) + 3600, delay_seconds: 3600,
   } }));
   await page.goto("/?mock=1&proto=recovery");
-  await page.getByRole("button", { name: "use recovery key", exact: true }).click();
+  await page.getByRole("button", { name: "Use recovery key", exact: true }).click();
   await page.locator("#recovery-username").fill("fixture_owner");
   await paste(page, phrase);
   await page.getByRole("button", { name: "Start recovery" }).click();

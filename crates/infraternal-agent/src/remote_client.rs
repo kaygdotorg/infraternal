@@ -325,8 +325,11 @@ async fn run_inner(
                     }
                     // A denial may mean the server clock still considers this
                     // leaf current, so a refused recovery never blocks mTLS.
-                    if let Some(endpoint) = identity.endpoint {
-                        let _ = renewal.recover(endpoint, &identity.server_name).await;
+                    if let Some(endpoint) = identity.endpoint
+                        && let Err(error) = renewal.recover(endpoint, &identity.server_name).await
+                        && is_retired(&error)
+                    {
+                        return Err(error);
                     }
                 }
             } else {
@@ -385,8 +388,10 @@ async fn run_inner(
                 .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
                 && let Some(renewal) = renewal
                 && let Some(endpoint) = identity.endpoint
+                && let Err(error) = renewal.recover(endpoint, &identity.server_name).await
+                && is_retired(&error)
             {
-                let _ = renewal.recover(endpoint, &identity.server_name).await;
+                return Err(error);
             }
             result
         }
@@ -617,6 +622,7 @@ async fn quic_session_on(
         let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control))
             .await
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        supervisor::check_retirement(hello.stream_id, &hello.frame)?;
         let mut prefix = Vec::new();
         encode_frame_into(&hello.frame, &mut prefix).map_err(io::Error::other)?;
         let hello = infraternal_protocol::decode_frame(&prefix).map_err(io::Error::other)?;
@@ -673,6 +679,9 @@ mod server_path;
 
 /// The reconnect loop and its offline watchdog; they live in `infraternal-link` (#580, L1).
 use infraternal_link::supervisor;
+
+/// Recognize the authenticated final outcome so the CLI can stop the service.
+pub use infraternal_link::supervisor::is_retired;
 
 /// The supervisor's regressions that need the real enrolled infraternal agent
 /// (its plugin host and state store), so they stay in this crate.

@@ -62,7 +62,7 @@ async function call(path: string, init?: { method: string; body: unknown }): Pro
       ...(init ? { headers: { "content-type": "application/json" }, body: JSON.stringify(init.body) } : {}),
     });
   } catch {
-    throw new ServiceError("The server could not be reached. Check your connection and try again.", "network");
+    throw new ServiceError("Couldn't reach the server. Check your connection and try again.", "network");
   }
 }
 

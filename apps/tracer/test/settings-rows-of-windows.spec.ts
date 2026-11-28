@@ -316,7 +316,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   await expect(preview).toBeVisible();
   await page.waitForTimeout(450);
   // Connection Keys is the 7-day key (D317): its quick facts come from the docs index as the docs wrote them.
-  await expect(preview.locator(".ui-dp-title")).toHaveText("Connection Keys");
+  await expect(preview.locator(".ui-dp-title")).toHaveText("Connection keys");
   await expect(preview.locator(".ui-dp-lead")).toContainText("Default every 7 days");
   await expect(preview.locator(".ui-dp-bullet")).toHaveCount(1);
   expect(await docsOnScreen(page), "the preview alone does not open the page").toBe(false);
@@ -353,7 +353,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
 
   // ⌘K goes straight to one setting: its window comes into view, the breadcrumb follows, the row is shown.
   await palette(page, "wireguard");
-  const found = page.locator('.result[data-action^="canvas:settings:"]', { has: page.locator(".result-label", { hasText: /^Connection Keys$/ }) });
+  const found = page.locator('.result[data-action^="canvas:settings:"]', { has: page.locator(".result-label", { hasText: /^Connection keys$/ }) });
   await expect(found).toBeVisible();
   await shot(page, "09-palette-wireguard");
   await found.click();
@@ -361,7 +361,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   expect(await active(page)).toBe("s-mesh-keys");
   expect(await crumbs(page)).toEqual(["Settings", "Mesh", "Keys"]);
   await palette(page, "browsers stay");
-  const browserRow = page.locator('.result[data-action^="canvas:settings:"]', { has: page.locator(".result-label", { hasText: /^Browsers Stay Signed In For$/ }) });
+  const browserRow = page.locator('.result[data-action^="canvas:settings:"]', { has: page.locator(".result-label", { hasText: /^Browser session length$/ }) });
   await expect(browserRow).toBeVisible();
   await browserRow.click();
   await page.waitForTimeout(500);
@@ -449,7 +449,7 @@ test("phone: a row for each component, the breadcrumb fits, rows align, \"?\" op
   await phoneQuestion.click();
   await expect(page.locator(".ui-sheet")).toBeVisible();
   await page.waitForTimeout(500);
-  await expect(page.locator(".ui-sheet .ui-dp-title")).toHaveText("Connection Keys");
+  await expect(page.locator(".ui-sheet .ui-dp-title")).toHaveText("Connection keys");
   await checkPreview(page, "sheet");
   await shot(page, "p03-preview");
   await page.evaluate(() => {

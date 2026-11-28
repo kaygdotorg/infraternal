@@ -155,6 +155,10 @@ pub(crate) async fn quic(
             {
                 Ok(Ok(authority)) => authority,
                 Ok(Err(_)) => {
+                    if retired(&store, &fingerprint).await {
+                        crate::remote_link::send_quic_retirement(connection).await;
+                        return;
+                    }
                     // Not a host. A device (#580) is admitted only by its own
                     // guard and gets a link that serves nothing; the host
                     // path below never sees it. The handshake lane stays
@@ -362,13 +366,20 @@ async fn handle_tcp_connection(
     };
     #[cfg(all(test, feature = "mesh-transport-proof"))]
     probe::record(probe::Kind::TlsHandshake, diagnostic_peer, 0);
-    let Ok(Ok(authority)) = tokio::time::timeout(
+    let authority = match tokio::time::timeout(
         Duration::from_secs(5),
-        AuthorityGuard::admit_transport(context.store, connection.peer_fingerprint),
+        AuthorityGuard::admit_transport(context.store.clone(), connection.peer_fingerprint),
     )
     .await
-    else {
-        return;
+    {
+        Ok(Ok(authority)) => authority,
+        Ok(Err(_)) => {
+            if retired(&context.store, &connection.peer_fingerprint).await {
+                let _ = crate::remote_link::send_retirement(&connection.channel).await;
+            }
+            return;
+        }
+        Err(_) => return,
     };
     let mut admission =
         crate::remote_standby::Admission::new(authority, permits, context.limits.standby.clone());
@@ -395,6 +406,18 @@ async fn handle_tcp_connection(
     {
         remember(&context.limits.known, address);
     }
+}
+
+/// Bound the fallback ledger lookup. Any failure keeps the original retryable refusal.
+pub(crate) async fn retired(store: &EnrollmentStore, fingerprint: &[u8; 32]) -> bool {
+    matches!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            store.installation_retired(fingerprint)
+        )
+        .await,
+        Ok(Ok(true))
+    )
 }
 
 /// Lane separation and the Retry pressure rule.

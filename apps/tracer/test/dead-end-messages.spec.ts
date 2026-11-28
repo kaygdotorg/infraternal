@@ -18,10 +18,10 @@ import { expect, test, type Page } from "playwright/test";
 const SHOTS = process.env.DEAD_END_SHOTS;
 /** The page the tests open: the production tracer in the test double, with the clusters canvas and the mocha theme. */
 const BASE = "/?mock=1&proto=clusters&docs=1&scene=3&theme=mocha&bg=none";
-/** The Keys Last setting's title (definitions.on-demand.ts): the one setting of the Apps window. */
-const KEYS_LAST = "Keys Last";
+/** The Keys last setting's title (definitions.on-demand.ts): the one setting of the Apps window. */
+const KEYS_LAST = "Keys last";
 /** The message a failed read shows in the row's place. */
-const READ_FAILED = "This could not be read just now.";
+const READ_FAILED = "Couldn't load this setting.";
 
 /** Opens the page with `query` (which names the Settings window) and waits until that window is up and has drawn. */
 async function open(page: Page, query: string): Promise<void> {
@@ -65,12 +65,12 @@ for (const [size, use] of Object.entries(SIZES)) {
       const WINDOW = '[data-window-id="s-you-apps"]';
       await open(page, "&at=you.profile&settingempty=you.apps");
       await shot(page, `${size}-04-apps-hidden`);
-      await expect(page.getByText("Keys Last", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("Keys last", { exact: true })).toHaveCount(0);
       await expect(page.locator(WINDOW)).toHaveCount(0);
       // The row keeps its other windows: Passkeys is still there.
       await expect(page.getByText("Passkeys", { exact: true }).first()).toBeVisible();
       await open(page, "&at=you.apps");
-      await expect(page.getByText("Keys Last", { exact: true })).toBeVisible({ timeout: 10_000 });
+      await expect(page.getByText("Keys last", { exact: true })).toBeVisible({ timeout: 10_000 });
       await shot(page, `${size}-05-apps-shown`);
     });
   });

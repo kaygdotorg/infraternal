@@ -976,6 +976,42 @@ for (const [host, title] of [
 
 // ── D359: Take over a finished install of another server (#394) ─────────────────────────────────────────────
 
+for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
+  test(`re-add reviews exact retirement paths at ${viewport.width}`, async ({ page }) => {
+    const sent: Array<Record<string, unknown>> = [];
+    page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+      if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* unrelated binary protocol */ } }
+    }));
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "root@retire.lab");
+    await page.locator(".ah-consent").click();
+    await inWizard(page, "Install as root").click();
+    const review = wizard(page).locator(".ah-page[data-page='failure']");
+    await expect(review.getByRole("heading", { name: "Retire the earlier installation on retire.lab?" })).toBeVisible({ timeout: 15_000 });
+    const paths = review.locator("[data-retirement] .ui-kv-value");
+    await expect(paths).toHaveText([
+      "/home/pat/.local/share/infraternal",
+      "/home/pat/.config/systemd/user/infraternal-agent.service",
+      "/home/pat/.local/bin/infraternal",
+    ]);
+    await expect(inWizard(page, "Keep earlier installation")).toBeVisible();
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    const offset = await review.evaluate((panel) => {
+      const left = (selector: string): number => panel.querySelector(selector)!.getBoundingClientRect().left;
+      return Math.max(Math.abs(left(".ah-lede") - left(".ah-title")), Math.abs(left("[data-retirement]") - left(".ah-title")));
+    });
+    expect(offset).toBeLessThanOrEqual(0.5);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    await page.screenshot({ path: tracerEvidencePath("addhost-retirement", `review-${viewport.width}.png`) });
+    await inWizard(page, "Retire and continue").click();
+    await expect.poll(() => sent.filter((command) => command.action === "start-fresh").length).toBe(1);
+    expect(sent.find((command) => command.action === "start-fresh")?.challenge).not.toBe("00000000-0000-0000-0000-000000000000");
+    await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  });
+}
+
 /** The old install's id the provisioning double reports for `takeover*` hosts. */
 const TAKEOVER_INSTALL = "c10909d16e8147a3b0f2e5d4c3b2a190";
 
