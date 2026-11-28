@@ -1600,7 +1600,8 @@ fn terminal_cleanup(path: &Path, config: &Config) -> io::Result<crate::cleanup::
     proof.extend_from_slice(&Frame::ShellStopped.encode()?);
     crate::cleanup::Cleanup::bind(path, Uid::effective().as_raw(), proof)
 }
-// Cleanup must not enlarge the ordinary input request's instruction working set.
+/// Stop the owned child for a peer that negotiated the cleanup capability.
+/// Keep this on the cold path so ordinary terminal input stays small.
 #[cold]
 #[inline(never)]
 fn stop_shell(

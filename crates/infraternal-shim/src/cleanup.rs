@@ -292,6 +292,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Retire only the records covered by this socket's sealed cleanup proof.
     #[test]
     fn attribution_requires_sealed_retirement_and_preserves_other_terminals() {
         let root = PathBuf::from(std::env::var_os("HOME").unwrap())
