@@ -75,7 +75,7 @@ fn review_at(root: &Path, owner: u32, caller: u32) -> io::Result<Review> {
             match existing(&path) {
                 Ok(Some(_)) => conditional.push(path),
                 Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                    conditional.push(path)
+                    conditional.push(path);
                 }
                 Ok(None) => {}
                 Err(error) => return Err(error),
