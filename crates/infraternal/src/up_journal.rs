@@ -15,7 +15,7 @@ use std::{
 /// Bound corrupt input before allocating or deserializing recovery instructions.
 const LIMIT: u64 = 1024 * 1024;
 /// A stable private file outside both server data and enrollment directories.
-const NAME: &str = ".infraternal-up.journal";
+pub(super) const NAME: &str = ".infraternal-up.journal";
 
 /// A complete synced line records either inode ownership or a lifecycle boundary.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -63,6 +63,11 @@ enum Record {
     Registered,
     /// A successful active check transfers ownership to the installed service.
     Committed,
+    /// The local uninstaller may continue after the private identity is gone.
+    Uninstalling {
+        /// Exact enrollment previously stored in the owned agent directory.
+        host: uuid::Uuid,
+    },
 }
 
 /// A read-only view of the last complete transaction, used by both preflight and recovery.
@@ -78,19 +83,23 @@ pub(super) struct Snapshot {
     pub(super) registered: bool,
     /// Committed installations must be managed normally, never recovered as partial installs.
     pub(super) committed: bool,
+    /// Host retained before any local enrollment or service files were removed.
+    pub(super) uninstalling: Option<uuid::Uuid>,
 }
 
 impl Snapshot {
     /// Test ownership against the entry itself; symlink targets never grant deletion rights.
     pub(super) fn owns(&self, path: &Path) -> bool {
-        !self.committed
-            && self.created.iter().any(|entry| {
-                entry.path == path
-                    && existing(path)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|metadata| entry.identity == (metadata.dev(), metadata.ino()))
+        !self.committed && self.recorded_inode(path)
+    }
+
+    /// Match a current entry against the authenticated publication record.
+    pub(super) fn recorded_inode(&self, path: &Path) -> bool {
+        existing(path).ok().flatten().is_some_and(|metadata| {
+            self.created.iter().any(|entry| {
+                entry.path == path && entry.identity == (metadata.dev(), metadata.ino())
             })
+        })
     }
 }
 
@@ -262,6 +271,9 @@ fn snapshot(file: &mut File, root: &Path) -> io::Result<Snapshot> {
             Record::Committed if begun && !state.committed => {
                 state.committed = true;
             }
+            Record::Uninstalling { host } if state.committed && state.uninstalling.is_none() => {
+                state.uninstalling = Some(host);
+            }
             _ => return Err(invalid()),
         }
     }
@@ -303,15 +315,67 @@ pub(super) fn inspect(root: &Path, owner: u32) -> io::Result<Snapshot> {
     };
     checked(&file, &path, owner)?;
     file.try_lock_shared().map_err(lock_error)?;
-    checked(&file, &path, owner)?;
-    snapshot(&mut file, root)
+    let state = checked(&file, &path, owner).and_then(|()| snapshot(&mut file, root));
+    file.unlock()?;
+    state
+}
+
+impl Drop for Journal {
+    /// Release the lock when the transaction ends, even if a concurrent fork
+    /// briefly inherited the still-open descriptor before exec closes it.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 impl Journal {
+    /// Reopen and lock a committed journal without creating a placeholder on retry.
+    pub(super) fn open_removal(root: &Path, owner: u32) -> io::Result<(Self, Snapshot)> {
+        let path = root.join(NAME);
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&path)?;
+        checked(&file, &path, owner)?;
+        file.try_lock().map_err(lock_error)?;
+        let mut journal = Self {
+            file,
+            root: root.to_owned(),
+        };
+        checked(&journal.file, &path, owner)?;
+        let state = snapshot(&mut journal.file, root)?;
+        Ok((journal, state))
+    }
+
+    /// Save the host before any deletion can remove its enrollment identity.
+    pub(super) fn start_removal(&mut self, host: uuid::Uuid) -> io::Result<()> {
+        // Drop an incomplete previous append before the next durable record.
+        let mut reader = &self.file;
+        reader.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        reader.take(LIMIT + 1).read_to_end(&mut bytes)?;
+        let end = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .ok_or_else(invalid)?
+            + 1;
+        self.file.set_len(end as u64)?;
+        self.append(&Record::Uninstalling { host })
+    }
+
+    /// Retire the lock after all owned resources are gone, fencing old openers.
+    pub(super) fn finish_removal(&self, owner: u32) -> io::Result<()> {
+        let path = self.root.join(NAME);
+        checked(&self.file, &path, owner)?;
+        fs::remove_file(path)?;
+        File::open(&self.root)?.sync_all()
+    }
+
     /// Acquire the stable private journal after read-only preflight has accepted this host.
     pub(super) fn open(root: &Path, owner: u32) -> io::Result<(Self, Snapshot)> {
         let path = root.join(NAME);
-        let mut file = match OpenOptions::new()
+        let file = match OpenOptions::new()
             .read(true)
             .append(true)
             .create_new(true)
@@ -334,16 +398,14 @@ impl Journal {
         };
         checked(&file, &path, owner)?;
         file.try_lock().map_err(lock_error)?;
-        checked(&file, &path, owner)?;
+        let mut journal = Self {
+            file,
+            root: root.to_owned(),
+        };
+        checked(&journal.file, &path, owner)?;
         File::open(root)?.sync_all()?;
-        let state = snapshot(&mut file, root)?;
-        Ok((
-            Self {
-                file,
-                root: root.to_owned(),
-            },
-            state,
-        ))
+        let state = snapshot(&mut journal.file, root)?;
+        Ok((journal, state))
     }
 
     /// Append and sync before the caller performs the operation authorized by this record.
@@ -449,5 +511,29 @@ impl Journal {
     /// Transfer ownership only after the service has passed its active check.
     pub(super) fn commit(&mut self) -> io::Result<()> {
         self.append(&Record::Committed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Check lock lifetime when another descriptor shares a transaction's open file.
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    /// A temporary inherited descriptor cannot keep a completed transaction locked.
+    #[test]
+    fn journal_releases_lock_before_the_last_descriptor_closes() {
+        let root = std::env::temp_dir().join(format!("jl-{}", uuid::Uuid::new_v4().simple()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let owner = nix::unistd::geteuid().as_raw();
+        let (journal, _) = Journal::open(&root, owner).unwrap();
+        let inherited = journal.file.try_clone().unwrap();
+        drop(journal);
+        let (next, _) = Journal::open_removal(&root, owner).unwrap();
+        drop(next);
+        assert!(inherited.metadata().unwrap().is_file());
+        drop(inherited);
+        fs::remove_dir_all(root).unwrap();
     }
 }

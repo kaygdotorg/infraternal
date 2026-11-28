@@ -246,7 +246,7 @@ pub fn remove_if_requested() -> Option<std::process::ExitCode> {
             return Some(std::process::ExitCode::FAILURE);
         }
     }
-    Some(match remove_installation(&host) {
+    Some(match remove_installation(&host, false) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!(
@@ -266,8 +266,133 @@ fn valid_host(host: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Read the selected root installation's public property list and, for root,
+/// its private receipt. A matching alias is conditional when only root can read
+/// its ownership flag. The caller rechecks the private receipt before removal.
+///
+/// # Errors
+/// Refuses a missing or foreign service and an invalid root installation receipt.
+pub fn review_removal() -> io::Result<RemovalReview> {
+    let base = Path::new(MACHINE_BASE);
+    let daemon = owned_machine_plist()?;
+    match require_root_directories(base) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound && daemon.is_none() => {
+            return if nix::unistd::geteuid().is_root() {
+                let directory = Path::new(LIFECYCLE_DIRECTORY);
+                require_root_directories(directory)?;
+                review_retired(directory)
+            } else {
+                Err(error)
+            };
+        }
+        Err(error) => return Err(error),
+    }
+    let mut paths = vec![base.to_path_buf()];
+    paths.extend(daemon.map(|daemon| PathBuf::from(daemon.plist)));
+    let (host, alias_created) = if nix::unistd::Uid::effective().is_root() {
+        let receipt = base.join(MACHINE_OWNER);
+        require_owned_plist(&fs::symlink_metadata(&receipt)?)?;
+        let mut contents = String::new();
+        File::open(receipt)?
+            .take(36)
+            .read_to_string(&mut contents)?;
+        let host = contents
+            .split_once(' ')
+            .ok_or(io::ErrorKind::InvalidData)?
+            .0;
+        (Some(host.to_owned()), installed_identity(host)?.1)
+    } else {
+        // The ownership receipt is private. Preview the matching alias and
+        // let the elevated cleanup check the receipt before removing it.
+        if daemon.is_none() {
+            match fs::symlink_metadata(base.join(MACHINE_OWNER)) {
+                Ok(metadata) => require_owned_plist(&metadata)?,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+                Err(error) => return Err(error),
+            }
+        }
+        (None, true)
+    };
+    let mut conditional_alias = None;
+    let link = Path::new(MACHINE_LINK);
+    if fs::symlink_metadata(link).is_ok_and(|metadata| metadata.uid() == 0)
+        && fs::read_link(link).is_ok_and(|target| target == Path::new(MACHINE_BINARY))
+    {
+        paths.push(link.to_path_buf());
+        let alias = link.with_file_name("infra");
+        if alias_created
+            && fs::symlink_metadata(&alias).is_ok_and(|metadata| metadata.uid() == 0)
+            && fs::read_link(&alias).is_ok_and(|target| target == Path::new("infraternal"))
+        {
+            if host.is_some() {
+                paths.push(alias);
+            } else {
+                conditional_alias = Some(alias);
+            }
+        }
+    }
+    Ok(RemovalReview {
+        host,
+        paths,
+        conditional_alias,
+        anchor: base.to_path_buf(),
+        retired: false,
+    })
+}
+
+/// The paths known to the current account and the inode that binds elevation.
+pub struct RemovalReview {
+    /// Host named by the private receipt or finished rename.
+    pub host: Option<String>,
+    /// Files the current account can enumerate.
+    pub paths: Vec<PathBuf>,
+    /// Root will verify whether it created the optional PATH alias.
+    pub conditional_alias: Option<PathBuf>,
+    /// Live base or private lifecycle directory.
+    pub anchor: PathBuf,
+    /// The service and backup steps were completed before the directory was renamed.
+    pub retired: bool,
+}
+
+/// After the atomic rename, only the renamed directory is still being removed.
+fn review_retired(lifecycle: &Path) -> io::Result<RemovalReview> {
+    let metadata = fs::symlink_metadata(lifecycle)?;
+    let owner = nix::unistd::geteuid().as_raw();
+    if !metadata.is_dir() || metadata.uid() != owner || metadata.mode() & 0o077 != 0 {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let mut paths = Vec::new();
+    let mut host = None;
+    for entry in fs::read_dir(lifecycle)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(name) = name.to_str().filter(|name| valid_host(name)) {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if host.is_some() || !metadata.is_dir() || metadata.uid() != owner {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            host = Some(name.to_owned());
+            paths.push(entry.path());
+        }
+    }
+    if host.is_none() {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    Ok(RemovalReview {
+        host,
+        paths,
+        conditional_alias: None,
+        anchor: lifecycle.to_path_buf(),
+        retired: true,
+    })
+}
+
 /// Stop the live utun owner before retiring only the approved install's files.
-fn remove_installation(host: &str) -> io::Result<()> {
+///
+/// # Errors
+/// Refuses stale ownership, an existing enrollment backup or a cleanup failure.
+pub fn remove_installation(host: &str, keep_state: bool) -> io::Result<()> {
     let _lock = MachineLock::acquire()?;
     if !valid_host(host) {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -292,6 +417,16 @@ fn remove_installation(host: &str) -> io::Result<()> {
             Err(io::ErrorKind::PermissionDenied.into())
         }
     };
+    let base = Path::new(MACHINE_BASE);
+    let backup =
+        keep_state.then(|| infraternal_plugin_api::uninstall_state::destination(base, host));
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::check_destination(
+            Path::new(MACHINE_DATA),
+            path,
+            0,
+        )?;
+    }
     let binary = Path::new(MACHINE_BINARY);
     let owned = owned_machine_plist()?;
     if trusted_executable(binary)? != binary
@@ -302,6 +437,9 @@ fn remove_installation(host: &str) -> io::Result<()> {
     verify()?;
     stop()?;
     verify()?;
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::preserve(Path::new(MACHINE_DATA), path, 0)?;
+    }
     remove_command_links(identity.1)?;
     verify()?;
     if let Some(daemon) = owned_machine_plist()? {
@@ -311,7 +449,6 @@ fn remove_installation(host: &str) -> io::Result<()> {
     verify()?;
     // Keep the receipt at the live path until every shared resource is gone.
     // Once renamed, deletion can resume without touching any replacement.
-    let base = Path::new(MACHINE_BASE);
     fs::rename(base, &retired)?;
     File::open(lifecycle)?.sync_all()?;
     File::open(base.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()?;
@@ -749,7 +886,25 @@ mod tests {
         CURRENT, DATA_DIRECTORY, LABEL, LEGACY, MACHINE_BINARY, STATE_DIRECTORY, checked_launchctl,
         join_state_to_forget, render_plist, render_plist_for, trusted_binary_metadata,
     };
-    use std::path::Path;
+    use std::{os::unix::fs::DirBuilderExt, path::Path};
+
+    /// A partially deleted renamed install remains discoverable after its receipt is gone.
+    #[test]
+    fn system_removal_review_finds_the_renamed_directory_after_unlink() {
+        let root = std::env::temp_dir().join(format!("iu-{}", std::process::id()));
+        let host = "0123456789abcdef0123456789abcdef";
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        std::fs::create_dir(root.join(host)).unwrap();
+        std::fs::write(root.join(host).join("remaining-key"), b"fixture").unwrap();
+        let review = super::review_retired(&root).unwrap();
+        assert_eq!(review.host.as_deref(), Some(host));
+        assert_eq!(review.paths, [root.join(host)]);
+        assert!(review.retired);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// Fresh installs use Apple data paths while legacy launchd jobs remain valid.
     #[test]

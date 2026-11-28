@@ -60,15 +60,14 @@ fn review_manual_commands_are_gated_on_this_hosts_bootstrap_owner() {
     }
 }
 
-/// A host infraternal setup did not install has no installation to check:
-/// no commands, and the message says so.
+/// An unrecorded installation has no verified command. Local cleanup is conditional.
 #[test]
 fn no_commands_for_a_host_setup_did_not_install() {
     let (message, manual) = outcome("unreachable", "rootless", "host.example", &[], None, false);
     assert!(manual.is_none());
-    assert!(
-        message.contains("infraternal setup didn't install"),
-        "{message}"
+    assert_eq!(
+        message,
+        "host.example was removed from the list. If infraternal is still installed, remove it on host.example."
     );
 }
 
@@ -160,10 +159,9 @@ fn pending_mac_removal_offers_the_installed_binary() {
         Some(Installation::Mac(HOST)),
         true,
     );
-    let command = format!(
-        "'/Library/Application Support/infraternal/bin/infraternal' --bootstrap-uninstall {HOST}"
+    assert_eq!(manual.as_deref(), Some("infraternal uninstall --system"));
+    assert_eq!(
+        message,
+        "Access revoked for host.example. Already uninstalled infraternal? Choose Forget. If it's still installed, run infraternal uninstall --system on host.example."
     );
-    assert_eq!(manual.as_deref(), Some(command.as_str()));
-    assert!(message.contains("on macOS as root"));
-    assert!(message.ends_with(&command));
 }

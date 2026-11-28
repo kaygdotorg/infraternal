@@ -50,6 +50,7 @@ flags and wording. This is the map:
 | `remove-host <HOST>` | remove a host (needs `--server`) |
 | `sessions` | saved-session automation on this machine (below) |
 | `up <server>` | join this Linux machine or Mac to a server |
+| `uninstall` | review and remove the local install, with `--system` for system installs in scripts |
 | `agent join`, `agent run` | enrol this machine and keep the infraternal agent connected |
 | `mesh status`, `mesh peers`, `mesh up`, `mesh down` | this machine's Mesh node |
 | `publish`, `unpublish` | expose a local service through the node proxy |
@@ -219,7 +220,7 @@ default. Run it as the person who uses the Mac, without `sudo`:
   the program by its new identifier (`kayg.infraternal`); click Allow.
   Removal takes both the old and the new pieces.
 - To remove it, run
-  `~/Library/Application\ Support/infraternal/bin/infraternal --bootstrap-uninstall <host>`
+  `infraternal uninstall`
   as the same person. It stops the agent, which drops the mesh interface and
   its routes, removes the helper's resolver file and the helper itself, and
   deletes the files above. It needs no password.

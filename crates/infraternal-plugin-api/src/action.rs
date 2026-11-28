@@ -387,6 +387,8 @@ pub enum CliHandler {
     Up,
     /// Run the elevated half of `up` without placing credentials in process arguments.
     UpSystem,
+    /// Preview and remove the locally installed infraternal agent.
+    Uninstall,
     /// Run the configured server in the foreground.
     ServerRun,
     /// Create and start a server service.

@@ -17,9 +17,9 @@ interface RemovalStart { review: string; action: { host_id: string; host: string
 /**
  * `manual` carries the command that removes a leftover install. While `host_cleanup` is `pending` the
  * server asks the host when it next connects and this is only the fallback (#409); otherwise the host
- * could not uninstall itself.
+ * could not uninstall itself. Device-approved `up_install` responses carry their own next steps.
  */
-interface Result { state: string; host_id: string; host_cleanup: string; message: string; manual?: string | null }
+interface Result { state: string; host_id: string; host_cleanup: string; message: string; manual?: string | null; up_install?: boolean }
 /** Retain the response status so only an expired admin window triggers a passkey request. */
 class RemovalError extends Error {
   /** A safe user-facing reason and the protocol status, never the response body. */
@@ -177,7 +177,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
           const asking = result.state === "pending" && result.host_cleanup === "pending";
           if (typeof manual === "string" && manual) {
             core.toast.show({
-              message: asking
+              message: result.up_install ? result.message : asking
                 ? `${name}: access revoked. It uninstalls infraternal as soon as it connects. If it never comes back, copy the command and run it there.`
                 : result.state === "pending"
                   ? `${name}: revoked, cleanup pending. infraternal is still installed on it. Copy the command and run it there.`
@@ -188,9 +188,9 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
               action: { label: "Copy command", onSelect: () => { void navigator.clipboard.writeText(manual).then(() => core.toast.show({ message: `Command copied. Run it on ${name}.`, duration: 5000 }), () => core.toast.show({ message: result.message, tone: "error", dismissible: true })); } },
             });
           } else {
-            core.toast.show({ message: result.message, duration: 5000 });
+            core.toast.show({ message: result.message, duration: 5000, ...(result.state === "pending" ? { icon: ICON_INFO } : {}) });
           }
-          return { state: result.state === "removed" ? "removed" : "pending", message: asking ? `${name}: access revoked. It uninstalls infraternal as soon as it connects.` : result.state === "pending" ? `${name}: access revoked. The uninstall is still pending.` : `${name} was removed.` };
+          return { state: result.state === "removed" ? "removed" : "pending", message: result.up_install ? result.message : asking ? `${name}: access revoked. It uninstalls infraternal as soon as it connects.` : result.state === "pending" ? `${name}: access revoked. The uninstall is still pending.` : `${name} was removed.` };
         } catch (error) {
           const message = error instanceof Error ? error.message : "Host removal failed. Try again.";
           if (!(error instanceof Error) || !toasted.has(error)) core.toast.show({ message, tone: "error", duration: 6000 });

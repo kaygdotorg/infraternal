@@ -1222,6 +1222,29 @@ pub fn clear_role_from_config_at(
     nft_path: Option<&Path>,
     systemctl_path: Option<&Path>,
 ) -> Result<String, PolicyError> {
+    clear_role(role, paths, nft_path, systemctl_path, true)
+}
+
+/// Retire an agent's input rules and policy. The installer journal owns the
+/// separate decision about the shared systemd loader and its enablement link.
+///
+/// # Errors
+/// Refuses an unsafe policy or a firewall change that cannot finish safely.
+pub fn clear_installed_agent_rules_at(
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+) -> Result<String, PolicyError> {
+    clear_role(PolicyRole::Agent, paths, nft_path, None, false)
+}
+
+/// Reconcile the selected role and optionally reconcile its shared loader.
+fn clear_role(
+    role: PolicyRole,
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+    systemctl_path: Option<&Path>,
+    manage_loader: bool,
+) -> Result<String, PolicyError> {
     let server = read_policy_file(paths.server_policy_path())?;
     let agent = read_policy_file(paths.agent_policy_path())?;
     let (cleared, remaining_server, remaining_agent) = match role {
@@ -1229,7 +1252,11 @@ pub fn clear_role_from_config_at(
         PolicyRole::Agent => (agent, server, None),
     };
     if cleared.is_none() {
-        return apply_from_config_at(paths, nft_path, systemctl_path);
+        return if manage_loader {
+            apply_from_config_at(paths, nft_path, systemctl_path)
+        } else {
+            Ok(String::new())
+        };
     }
 
     let no_remaining_policy = remaining_server.is_none() && remaining_agent.is_none();
@@ -1253,7 +1280,7 @@ pub fn clear_role_from_config_at(
         policy_path.display()
     );
 
-    if no_remaining_policy {
+    if no_remaining_policy && manage_loader {
         report.push_str(&remove_owned_loader(paths, systemctl_path)?);
     }
     Ok(report)
@@ -1264,6 +1291,14 @@ pub fn clear_role_from_config_at(
 /// # Errors
 /// Returns an error when the file is unsafe, oversized, unreadable, or malformed.
 pub fn read_policy_file(path: &Path) -> Result<Option<Policy>, PolicyError> {
+    read_policy_file_for_owner(path, 0)
+}
+
+/// Read the marked policy for the owner of a checked installation namespace.
+///
+/// # Errors
+/// Rejects unsafe file metadata, oversized input or a foreign policy marker.
+pub fn read_policy_file_for_owner(path: &Path, owner: u32) -> Result<Option<Policy>, PolicyError> {
     #[cfg(any(test, feature = "test-support"))]
     refuse_live_test_policy(path)?;
     let mut options = OpenOptions::new();
@@ -1276,7 +1311,11 @@ pub fn read_policy_file(path: &Path) -> Result<Option<Policy>, PolicyError> {
         Err(error) => return Err(PolicyError::Io(error)),
     };
     let metadata = file.metadata().map_err(PolicyError::Io)?;
-    if !metadata.is_file() || !safe_policy_owner(&metadata) || metadata.len() > MAX_POLICY_BYTES {
+    #[cfg(unix)]
+    let approved_owner = metadata.uid() == owner && metadata.mode() & 0o022 == 0;
+    #[cfg(not(unix))]
+    let approved_owner = metadata.is_file();
+    if !metadata.is_file() || !approved_owner || metadata.len() > MAX_POLICY_BYTES {
         return Err(PolicyError::UnsafePolicy(path.to_owned()));
     }
     let capacity =

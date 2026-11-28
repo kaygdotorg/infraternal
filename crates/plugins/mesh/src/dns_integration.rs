@@ -1572,6 +1572,29 @@ fn remove_macos_files(force_refresh: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// List the resolver files this build would remove during macOS uninstall.
+#[cfg(target_os = "macos")]
+pub(crate) fn managed_macos_paths() -> io::Result<Vec<std::path::PathBuf>> {
+    let directory = Path::new(MACOS_RESOLVER_DIRECTORY);
+    match fs::symlink_metadata(directory) {
+        Ok(metadata)
+            if metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0 => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+        Ok(_) => return Err(io::ErrorKind::PermissionDenied.into()),
+    }
+    let entries = fs::read_dir(directory)?;
+    let mut managed = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if is_managed_file(&path)? {
+            managed.push(path);
+        }
+    }
+    managed.sort_unstable();
+    Ok(managed)
+}
+
 /// Identifies a regular root-owned resolver file as ours by its first line.
 #[cfg(target_os = "macos")]
 fn is_managed_file(path: &Path) -> io::Result<bool> {

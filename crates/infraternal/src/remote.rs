@@ -1078,6 +1078,16 @@ fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
     Ok((stored, snapshot))
 }
 
+/// Read the host ID from this account's private Linux enrollment.
+#[cfg(all(machine_up, target_os = "linux"))]
+pub(crate) fn local_enrolled_host(data: &Path, uid: u32) -> io::Result<uuid::Uuid> {
+    let (identity, _) = load_snapshot(data)?;
+    if identity.execution_uid != uid {
+        return Err(refused());
+    }
+    Ok(identity.host_id)
+}
+
 /// Move an enrolled identity off its legacy 7443 address before the service retries.
 fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
     let (mut stored, snapshot) = load_snapshot(data)?;
@@ -1146,6 +1156,84 @@ fn relay_host_leaf(
     })
 }
 
+/// Send a bounded, host-signed retirement request before stopping the local service.
+/// A false result means the caller should offer the server's Remove and Forget path.
+#[cfg(machine_up)]
+pub(crate) fn retire_for_local_uninstall(data: &Path, host: &str) -> bool {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .is_ok_and(|runtime| {
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(8), request_local_retirement(data, host))
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+            })
+        })
+}
+
+/// Authenticate the HTTPS origin and send proof only for the reviewed host.
+#[cfg(machine_up)]
+async fn request_local_retirement(data: &Path, host: &str) -> io::Result<()> {
+    use infraternal_plugin_remote::local_retirement::{self, Request};
+    let (stored, _) = load_snapshot(data)?;
+    if stored.host_id.simple().to_string() != host
+        || stored.execution_uid != nix::unistd::Uid::effective().as_raw()
+    {
+        return Err(refused());
+    }
+    let origin = stored.public_origin.as_deref().ok_or_else(refused)?;
+    let url = url::Url::parse(origin).map_err(|_| refused())?;
+    if url.scheme() != "https" || url.origin().ascii_serialization() != origin {
+        return Err(refused());
+    }
+    let root = identity_https_root(&stored)?;
+    let certificate = B64.decode(&stored.certificate_der).map_err(|_| refused())?;
+    let signed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|time| i64::try_from(time.as_secs()).ok())
+        .ok_or_else(refused)?;
+    let mut request = Request {
+        host_id: stored.host_id,
+        fingerprint: openssl::sha::sha256(&certificate),
+        signed_at,
+        signature: Vec::new(),
+    };
+    let key_der = decode_candidate_key(&stored.key_der)?;
+    let key = PKey::private_key_from_pkcs8(&key_der).map_err(|_| refused())?;
+    request.signature = openssl::sign::Signer::new_without_digest(&key)
+        .and_then(|mut signer| signer.sign_oneshot_to_vec(&local_retirement::transcript(&request)))
+        .map_err(|_| refused())?;
+    let body = serde_json::to_vec(&request).map_err(io::Error::other)?;
+    let response = post_json(
+        &url,
+        local_retirement::PATH,
+        body.into(),
+        root.as_ref(),
+        256,
+        &mut false,
+        None,
+    )
+    .await
+    .map_err(|_| refused())?;
+    if response.status != StatusCode::NO_CONTENT {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Load the same public HTTPS trust the enrollment uses when dialing its server.
+fn identity_https_root(stored: &StoredIdentity) -> io::Result<Option<X509>> {
+    if stored.https_system_roots {
+        return Ok(None);
+    }
+    let trusted = stored.https_der.as_ref().unwrap_or(&stored.ca_der);
+    X509::from_der(&B64.decode(trusted).map_err(|_| refused())?)
+        .map(Some)
+        .map_err(|_| refused())
+}
+
 /// Run the remote client from the stored identity in `data`.
 pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let stored = migrate_identity(data)?;
@@ -1158,16 +1246,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         infraternal_agent::host_os::enrolled_without_direct_endpoint();
     }
     let public_origin = stored.public_origin.clone().ok_or_else(refused)?;
-    let https_root = if stored.https_system_roots {
-        None
-    } else if let Some(https) = &stored.https_der {
-        Some(X509::from_der(&B64.decode(https).map_err(|_| refused())?).map_err(|_| refused())?)
-    } else {
-        Some(
-            X509::from_der(&B64.decode(&stored.ca_der).map_err(|_| refused())?)
-                .map_err(|_| refused())?,
-        )
-    };
+    let https_root = identity_https_root(&stored)?;
     let certificate = X509::from_der(&B64.decode(&stored.certificate_der).map_err(|_| refused())?)
         .map_err(|_| refused())?;
     let key_der = decode_candidate_key(&stored.key_der)?;

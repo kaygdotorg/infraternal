@@ -58,6 +58,9 @@ mod test_executable;
 /// The one check that a program root will run is one only root can replace (#146).
 #[cfg(any(machine_up, feature = "plugin-server"))]
 mod trusted_program;
+/// Reviews and removes the current machine's native installation.
+#[cfg(machine_up)]
+mod uninstall;
 #[cfg(machine_up)]
 mod up;
 
@@ -235,6 +238,10 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }
+    #[cfg(machine_up)]
+    if let Some(result) = uninstall::elevated_if_requested() {
+        return result;
+    }
     // A person removing their own macOS user-mode install (#146); root mode is handled below.
     #[cfg(all(machine_up, target_os = "macos"))]
     if let Some(result) = up::macos_user::uninstall_if_requested() {
@@ -410,6 +417,16 @@ fn dispatch_action(
         }
         CliHandler::Skill => run_skill(registry, matches, json_output),
         CliHandler::SignIn => run_sign_in(action, matches, json_output),
+        CliHandler::Uninstall => {
+            #[cfg(machine_up)]
+            {
+                uninstall::run(matches, json_output)
+            }
+            #[cfg(not(machine_up))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
         CliHandler::Up | CliHandler::UpSystem => dispatch_up_action(action, matches, json_output),
         CliHandler::ServerPlugin => {
             #[cfg(feature = "release")]

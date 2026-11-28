@@ -155,13 +155,174 @@ pub(crate) fn public_file(path: &Path, uid: u32, max: u64) -> io::Result<String>
     }
     Ok(bytes)
 }
+
+/// Read an installation's fixed public unit with the same checks as bootstrap review.
+///
+/// # Errors
+/// Refuses unsafe ownership, symbolic links or oversized units.
+pub fn read_service_unit(path: &Path, uid: u32) -> io::Result<String> {
+    public_file(path, uid, 4096)
+}
+/// The Linux paths and host used to review native service removal.
+pub struct Review {
+    /// The bootstrap state and host selected for removal.
+    pub context: Context,
+    /// The installation root that owns the enrollment and runtime directories.
+    pub base: PathBuf,
+    /// The files systemd and command discovery use for this installation.
+    pub paths: Vec<PathBuf>,
+    /// Private paths the privileged cleanup still needs to verify.
+    pub conditional: Vec<PathBuf>,
+}
+
+/// Find the host marker in this account's installed systemd unit.
+///
+/// # Errors
+/// Rejects an unrelated unit. An unprivileged review of a system install reads
+/// the public unit only. The elevated command always validates the private receipt.
+pub fn review(home: &Path, uid: u32, caller: u32) -> io::Result<Review> {
+    let paths = layout(&installation(&"0".repeat(32), home, uid), home, uid)?;
+    let unit = optional_unit(&paths, uid)?;
+    let receipt = paths.base.join(".bootstrap-owner");
+    let host = if let Some(unit) = &unit {
+        unit.lines()
+            .find_map(|line| line.strip_prefix("# infraternal bootstrap "))
+            .ok_or_else(denied)?
+            .to_owned()
+    } else if caller == uid {
+        public_file(&receipt, uid, 64)?.trim().to_owned()
+    } else {
+        // The root bootstrap base may be non-traversable. Its elevated check
+        // must read the receipt before the parent may perform any cleanup.
+        if !std::fs::symlink_metadata(&paths.base)?.is_dir() {
+            return Err(denied());
+        }
+        match std::fs::symlink_metadata(&receipt) {
+            Ok(metadata) if metadata.is_file() && metadata.uid() == uid => {}
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+            Err(error) => return Err(error),
+            Ok(_) => return Err(denied()),
+        }
+        "0".repeat(32)
+    };
+    let context = installation(&host, home, uid);
+    let paths = layout(&context, home, uid)?;
+    if let Some(unit) = &unit {
+        validate_unit(unit, &paths, &host)?;
+    }
+    if caller == uid {
+        validate_artifacts(&context, home, uid, true, true).map_err(|error| {
+            if unit.is_some() && error.kind() == io::ErrorKind::NotFound {
+                denied()
+            } else {
+                error
+            }
+        })?;
+    }
+    let mut removal = vec![
+        paths.unit,
+        paths.launcher.clone(),
+        paths.base.join("bin"),
+        paths.base.join("sessions"),
+    ];
+    if paths.wanted.is_symlink() {
+        removal.push(paths.wanted);
+    }
+    let alias = paths.launcher.with_file_name("infra");
+    if std::fs::symlink_metadata(&alias).is_ok_and(|metadata| metadata.uid() == uid)
+        && std::fs::read_link(&alias).is_ok_and(|target| target == Path::new("infraternal"))
+    {
+        removal.push(alias);
+    }
+    let mut conditional = Vec::new();
+    match owned_payload_cache(&paths.base, uid) {
+        Ok(Some(cache)) => removal.push(cache),
+        Err(error) if uid != caller && error.kind() == io::ErrorKind::PermissionDenied => {
+            conditional.push(paths.base.with_file_name("infraternal.bootstrap-cache"));
+        }
+        _ => {}
+    }
+    if !paths.user {
+        removal
+            .extend(infraternal_plugin_api::mesh_ssh_files::review_client_config(Path::new("/"))?);
+    }
+    Ok(Review {
+        context,
+        base: paths.base,
+        paths: removal,
+        conditional,
+    })
+}
+
+/// Locate only the SSH installer's private, marked public payload cache.
+fn owned_payload_cache(base: &Path, uid: u32) -> io::Result<Option<PathBuf>> {
+    let cache = base.with_file_name("infraternal.bootstrap-cache");
+    let metadata = match std::fs::symlink_metadata(&cache) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o777 != 0o700
+        || public_file(&cache.join("owner"), uid, 64)? != "INFRATERNAL_PAYLOAD_CACHE_V1\n"
+    {
+        return Err(denied());
+    }
+    for entry in std::fs::read_dir(&cache)? {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        let mode = match entry.file_name().to_str() {
+            Some("owner") => 0o600,
+            Some("payload") => 0o700,
+            _ => return Err(denied()),
+        };
+        if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o777 != mode {
+            return Err(denied());
+        }
+    }
+    Ok(Some(cache))
+}
+
 /// Revalidate every owned artifact before handing off or removing any of them.
 /// # Errors
 /// Refuses arbitrary layouts, another uid/host, symlinks or unrelated units/launchers.
 pub fn validate(context: &Context, home: &Path, uid: u32) -> io::Result<()> {
-    validate_artifacts(context, home, uid, true)
+    validate_artifacts(context, home, uid, true, false)
 }
-fn validate_artifacts(context: &Context, home: &Path, uid: u32, unlocked: bool) -> io::Result<()> {
+
+/// Inspect a service file when present, including rejecting a foreign symlink.
+fn optional_unit(paths: &Layout, uid: u32) -> io::Result<Option<String>> {
+    match public_file(&paths.unit, uid, 4096) {
+        Ok(unit) => Ok(Some(unit)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// A completed unlink is valid during removal. Existing links must still match their owner and target.
+fn check_link(path: &Path, target: &Path, uid: u32, optional: bool) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.is_symlink()
+                && metadata.uid() == uid
+                && std::fs::read_link(path)? == target =>
+        {
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound && optional => Ok(()),
+        _ => Err(denied()),
+    }
+}
+
+/// Verify the receipt, service unit and launch links for this exact bootstrap install.
+fn validate_artifacts(
+    context: &Context,
+    home: &Path,
+    uid: u32,
+    unlocked: bool,
+    removing: bool,
+) -> io::Result<()> {
     let paths = layout(context, home, uid)?;
     let base = std::fs::symlink_metadata(&paths.base)?;
     // Only root's /var/lib/infraternal may also be 0711: `infraternal up` lays
@@ -184,25 +345,43 @@ fn validate_artifacts(context: &Context, home: &Path, uid: u32, unlocked: bool) 
             _ => return Err(denied()),
         }
     }
-    let unit = public_file(&paths.unit, uid, 4096)?;
-    if !unit
-        .lines()
-        .any(|line| line == format!("# infraternal bootstrap {}", context.host))
-        || !unit.lines().any(|line| line == "KillMode=process")
-        || !unit.lines().any(|line| line == format!("ExecStart=\"{0}/bin/current\" agent --data \"{0}/state\" --state \"{0}/sessions\" run", paths.base.display()))
-    {
-        return Err(denied());
+    let unit = optional_unit(&paths, uid)?;
+    if let Some(unit) = &unit {
+        validate_unit(unit, &paths, &context.host)?;
+    } else if !removing {
+        return Err(io::ErrorKind::NotFound.into());
     }
-    if std::fs::read_link(&paths.launcher)? != paths.base.join("bin/current")
-        || std::fs::read_link(paths.base.join("bin/current"))? != paths.base.join("bin/live")
-    {
-        return Err(denied());
-    }
+    let completed_unlinks = removing && unit.is_none();
+    check_link(
+        &paths.launcher,
+        &paths.base.join("bin/current"),
+        uid,
+        completed_unlinks,
+    )?;
+    check_link(
+        &paths.base.join("bin/current"),
+        &paths.base.join("bin/live"),
+        uid,
+        completed_unlinks,
+    )?;
     match std::fs::read_link(&paths.wanted) {
         Ok(target)
             if target == paths.unit || target == Path::new("../infraternal-agent.service") => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         _ => return Err(denied()),
+    }
+    Ok(())
+}
+
+/// Check systemd's public unit before trusting it to identify a bootstrap installation.
+fn validate_unit(unit: &str, paths: &Layout, host: &str) -> io::Result<()> {
+    if !unit
+        .lines()
+        .any(|line| line == format!("# infraternal bootstrap {host}"))
+        || !unit.lines().any(|line| line == "KillMode=process")
+        || !unit.lines().any(|line| line == format!("ExecStart=\"{0}/bin/current\" agent --data \"{0}/state\" --state \"{0}/sessions\" run", paths.base.display()))
+    {
+        return Err(denied());
     }
     Ok(())
 }
@@ -246,7 +425,7 @@ impl UninstallPlugin {
         // The service starts while bootstrap still holds its publication lock.
         // Register the owned handler now; every call and cleanup rechecks the
         // lock, so installation must finish before any removal is accepted.
-        validate_artifacts(&context, &home, uid, false)?;
+        validate_artifacts(&context, &home, uid, false, false)?;
         Ok(Self {
             context,
             home,
@@ -640,11 +819,25 @@ pub async fn cleanup(
     uid: u32,
     kernel: Kernel,
 ) -> io::Result<Vec<String>> {
+    cleanup_with_state(context, home, uid, kernel, false).await
+}
+
+/// Remove the reviewed install, optionally keeping a private copy of its enrollment.
+///
+/// # Errors
+/// Refuses an unowned install, an existing backup, or incomplete service cleanup.
+pub async fn cleanup_with_state(
+    context: &Context,
+    home: &Path,
+    uid: u32,
+    kernel: Kernel,
+    keep_state: bool,
+) -> io::Result<Vec<String>> {
     let paths = layout(context, home, uid)?;
     // Held until return: a re-add of this host meanwhile is refused with
     // "Setup is already running" instead of racing the removal (#235).
     let _setup = setup_guard(&paths.base).await?;
-    cleanup_locked(context, &paths, home, uid, kernel, true).await
+    cleanup_locked(context, &paths, home, uid, kernel, true, keep_state).await
 }
 
 /// Remove a committed root install only while its transaction still owns the
@@ -664,7 +857,7 @@ pub async fn cleanup_for_promotion(
     if !committed_transaction_matches(&paths.base, transaction, uid)? {
         return Ok(false);
     }
-    cleanup_locked(context, &paths, home, uid, kernel, false).await?;
+    cleanup_locked(context, &paths, home, uid, kernel, false, false).await?;
     Ok(true)
 }
 
@@ -676,42 +869,35 @@ async fn cleanup_locked(
     uid: u32,
     kernel: Kernel,
     stop_agent: bool,
+    keep_state: bool,
 ) -> io::Result<Vec<String>> {
-    validate(context, home, uid)?;
-    (kernel.inspect)(&context.sessions)?;
-    let sockets = context.sessions.join("sessions");
-    if sockets.exists() {
-        let metadata = std::fs::symlink_metadata(&sockets)?;
-        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-            return Err(denied());
-        }
-        let entries = std::fs::read_dir(&sockets)?.collect::<Result<Vec<_>, _>>()?;
-        if entries.len() > 128 {
-            return Err(denied());
-        }
-        for entry in entries {
-            let path = entry.path();
-            if path.extension().is_some_and(|s| s == "sock") {
-                retire_session(&path, uid).await?;
-            }
-        }
+    validate_artifacts(context, home, uid, true, true)?;
+    let backup = keep_state
+        .then(|| infraternal_plugin_api::uninstall_state::destination(&paths.base, &context.host));
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::check_destination(&context.data, path, uid)?;
     }
-    if stop_agent {
-        manager(paths, &["disable", "--now", "infraternal-agent.service"]).await?;
-    } else {
-        // The abandonment reply travels over this daemon's live link. Disable
-        // its unit now, then stop the already-running process after the reply.
-        manager(paths, &["disable", "infraternal-agent.service"]).await?;
+    (kernel.inspect)(&context.sessions)?;
+    retire_sessions(&context.sessions, uid).await?;
+    if optional_unit(paths, uid)?.is_some() {
+        if stop_agent {
+            manager(paths, &["disable", "--now", "infraternal-agent.service"]).await?;
+        } else {
+            // The abandonment reply still needs this daemon's live link.
+            manager(paths, &["disable", "infraternal-agent.service"]).await?;
+        }
     }
     // Recheck after manager calls; never unlink a replacement made during stop.
-    validate(context, home, uid)?;
+    validate_artifacts(context, home, uid, true, true)?;
     let report: Vec<String> = (kernel.retire)(&context.sessions)?
         .into_iter()
         .map(left_line)
         .collect();
-    std::fs::remove_file(&paths.unit)?;
-    infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
-    std::fs::remove_file(&paths.launcher)?;
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::preserve(&context.data, path, uid)?;
+    }
+    unlink_if_present(&paths.wanted)?;
+    unlink_if_present(&paths.unit)?;
     manager(paths, &["daemon-reload"]).await?;
     // A rootful agent may have written mesh SSH's client files (#221); they
     // go with it. Only files infraternal wrote are removed.
@@ -725,7 +911,69 @@ async fn cleanup_locked(
             infraternal_plugin_api::mesh_ssh_files::KNOWN_HOSTS_PATH
         ));
     }
+    match owned_payload_cache(&paths.base, uid) {
+        Ok(Some(cache)) => {
+            if let Err(error) = std::fs::remove_dir_all(&cache) {
+                report.push(format!(
+                    "Couldn't remove {} ({error}). Remove the cache by hand.",
+                    cache.display()
+                ));
+            }
+        }
+        Ok(None) => {}
+        Err(_) => report.push(format!(
+            "Left {} because infraternal could not verify its ownership.",
+            paths
+                .base
+                .with_file_name("infraternal.bootstrap-cache")
+                .display()
+        )),
+    }
+    infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
+    unlink_if_present(&paths.launcher)?;
     remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())
+}
+
+/// A finished unlink is valid on the next removal attempt.
+fn unlink_if_present(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+        Ok(()) => {
+            std::fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()
+        }
+    }
+}
+
+/// Close the session shims belonging to a proven installation's runtime directory.
+///
+/// # Errors
+/// Refuses foreign or unsafe directories, excess sockets and failed shutdowns.
+pub async fn retire_sessions(runtime: &Path, uid: u32) -> io::Result<()> {
+    for path in [runtime, &runtime.join("sessions")] {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata)
+                if metadata.is_dir()
+                    && metadata.uid() == uid
+                    && metadata.mode().trailing_zeros() >= 6 => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+            Ok(_) => return Err(denied()),
+        }
+    }
+    let entries = std::fs::read_dir(runtime.join("sessions"))?
+        .take(129)
+        .collect::<Result<Vec<_>, _>>()?;
+    if entries.len() > 128 {
+        return Err(denied());
+    }
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().is_some_and(|suffix| suffix == "sock") {
+            retire_session(&path, uid).await?;
+        }
+    }
+    Ok(())
 }
 /// Retire this account's rootless installation after its host was upgraded
 /// to the root infraternal agent (D376, #399; J415 R5, R6).
@@ -884,6 +1132,7 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
             _ => {}
         }
     }
+    std::fs::File::open(base)?.sync_all()?;
     for file in [
         ".bootstrap-ready",
         ".bootstrap-transaction",
@@ -891,13 +1140,13 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
         STAGED,
         ".bootstrap-owner",
     ] {
-        match std::fs::remove_file(base.join(file)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
+        unlink_if_present(&base.join(file))?;
     }
     match std::fs::remove_dir(base) {
-        Ok(()) => Ok(Vec::new()),
+        Ok(()) => {
+            std::fs::File::open(base.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()?;
+            Ok(Vec::new())
+        }
         Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(vec![format!(
             "Left {} because it holds files infraternal setup didn't create.",
             base.display()
@@ -993,6 +1242,64 @@ mod tests {
         symlink(base.join("bin/live"), base.join("bin/current")).unwrap();
         Some((home, context, uid))
     }
+    /// The system unit must name the fixed system paths, even in an unprivileged preview.
+    #[test]
+    fn system_review_refuses_user_paths_in_the_installed_unit() {
+        let home = Path::new("/root");
+        let context = super::installation("00000000000000000000000000000001", home, 0);
+        let layout = layout(&context, home, 0).unwrap();
+        let unit = format!(
+            "# infraternal bootstrap {}\nKillMode=process\nExecStart=\"/var/lib/infraternal/bin/current\" agent --data \"/var/lib/infraternal/state\" --state \"/var/lib/infraternal/sessions\" run\n",
+            context.host
+        );
+        assert!(super::validate_unit(&unit, &layout, &context.host).is_ok());
+        let unrelated = unit.replace(
+            "/var/lib/infraternal",
+            "/home/other/.local/share/infraternal",
+        );
+        assert!(super::validate_unit(&unrelated, &layout, &context.host).is_err());
+    }
+
+    /// Review names only the canonical Linux user installation and refuses an altered launcher.
+    #[test]
+    fn review_refuses_a_launcher_pointing_outside_the_owned_install() {
+        let Some((home, context, uid)) = installation("review", false) else {
+            return;
+        };
+        let plan = super::review(&home, uid, uid).unwrap();
+        assert_eq!(plan.context.host, context.host);
+        assert!(
+            plan.paths
+                .contains(&home.join(".config/systemd/user/infraternal-agent.service"))
+        );
+        let launcher = home.join(".local/bin/infraternal");
+        std::fs::remove_file(&launcher).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", &launcher).unwrap();
+        assert!(super::review(&home, uid, uid).is_err());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// The private receipt still identifies the install after its service file and links are gone.
+    #[test]
+    fn review_resumes_after_releasing_systemd_paths() {
+        let Some((home, context, uid)) = installation("review-resume", false) else {
+            return;
+        };
+        let paths = layout(&context, &home, uid).unwrap();
+        for file in [
+            &paths.unit,
+            &paths.launcher,
+            &paths.base.join("bin/current"),
+        ] {
+            std::fs::remove_file(file).unwrap();
+            assert_eq!(
+                super::review(&home, uid, uid).unwrap().context.host,
+                context.host
+            );
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn bootstrap_lock_delays_uninstall_without_omitting_its_handler() {
         let Some((home, context, uid)) = installation("n", true) else {
