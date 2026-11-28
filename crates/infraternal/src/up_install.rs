@@ -1074,7 +1074,12 @@ mod tests {
             .unwrap();
         install.install_host_firewall().unwrap();
         install.journal.register().unwrap();
+        // Simulate a helper that exited without unwinding. Release the lock
+        // without rolling back or putting a commit record in the journal.
+        install.committed = true;
+        drop(install);
         let mut recovery = journal::inspect(&fixture.0, owner).unwrap();
+        assert!(recovery.registered && !recovery.committed);
         let path = fixture
             .0
             .join(host_firewall::AGENT_POLICY_PATH.trim_start_matches('/'));
