@@ -65,12 +65,14 @@ test("a remote user-mode refusal identifies the host and missing account", async
     message: "mac-build couldn't open a shell as the account with user ID 501. Check the account on mac-build, then try again.",
     sessionList: false, action: "retry",
   });
-  for (const reason of ["permission", "no_login"]) {
-    expect(terminalRefusal(await refusal({ reason, execution_uid: "untrusted text" }), "mac-build", true)).toEqual({
-      message: "mac-build couldn't open a shell as its own account. Check the account on mac-build, then try again.",
-      sessionList: false, action: "retry",
-    });
-  }
+  expect(terminalRefusal(await refusal({ reason: "no_login", execution_uid: "untrusted text" }), "mac-build", true)).toEqual({
+    message: "mac-build couldn't open a shell as its own account. Check the account on mac-build, then try again.",
+    sessionList: false, action: "retry",
+  });
+  expect(terminalRefusal(await refusal({ reason: "permission" }), "mac-build", true)).toEqual({
+    message: "mac-build cannot open a shell as the requested account. Check which account runs infraternal on mac-build, then try again.",
+    sessionList: false, action: "retry",
+  });
 });
 
 test("a root host without systemd says why it opens no logins and what works instead (D354)", async () => {

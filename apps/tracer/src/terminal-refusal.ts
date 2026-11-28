@@ -28,7 +28,9 @@ export function terminalRefusal(error: unknown, hostName?: string, remote = fals
         return { message: `${host} is low on memory${details}. Close sessions you no longer need.`, sessionList: true, action: "sessions" };
       }
       case "invalid": return { message: "This terminal request is not valid. Try opening a new window.", sessionList: false, action: "none" };
-      case "permission":
+      case "permission": return remote
+        ? { message: `${host} cannot open a shell as the requested account. Check which account runs infraternal on ${host}, then try again.`, sessionList: false, action: "retry" }
+        : { message: ROOTLESS, sessionList: false, action: "add-host" };
       case "no_login": {
         if (!remote) return { message: ROOTLESS, sessionList: false, action: "add-host" };
         const account = error.executionUid === undefined ? "its own account" : `the account with user ID ${error.executionUid}`;
