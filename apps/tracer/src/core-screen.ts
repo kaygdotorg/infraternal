@@ -1682,7 +1682,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const error = stage.querySelector<HTMLElement>("#recovery-cancel-error")!;
     error.textContent = "";
     void options.onCancelRecovery?.().catch(() => {
-      error.textContent = "Recovery could not be cancelled. Try again.";
+      error.textContent = "Couldn't cancel recovery. Check your connection and try again.";
     }).finally(() => { cancelRecovery.disabled = false; });
   };
   cancelRecovery?.addEventListener("click", cancelClick);

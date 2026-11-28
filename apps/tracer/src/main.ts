@@ -409,7 +409,7 @@ function consumeDeviceApprovalLink(): ApprovalLink {
   try {
     history.replaceState(history.state, "", cleaned);
   } catch {
-    return { error: "This link could not be cleared from the address bar. Close this page and open the link again.", kind: link?.kind ?? "sign_in" };
+    return { error: "Couldn't clear this link from the address bar. Close this page and open the link again.", kind: link?.kind ?? "sign_in" };
   }
   return link;
 }
@@ -926,11 +926,12 @@ async function checkForegroundSession(): Promise<void> {
 }
 
 
+/** Turns a sign-in or approval error into a safe, plain-language message for the user. */
 function safeMessage(error: unknown): string {
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) {
-    return "The passkey prompt was cancelled or timed out. Try again when you are ready.";
+    return "Passkey prompt was cancelled or timed out. Try again.";
   }
-  return error instanceof AuthError ? error.message : "The request could not be completed. Try again.";
+  return error instanceof AuthError ? error.message : "Couldn't complete sign-in. Check your connection and try again.";
 }
 
 function mustGet<ElementType extends HTMLElement = HTMLElement>(selector: string): ElementType {

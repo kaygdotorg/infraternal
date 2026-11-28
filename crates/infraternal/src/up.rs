@@ -211,6 +211,70 @@ impl Failure {
         }
     }
 
+    /// Give a person the cause and a recovery step that fits the failure.
+    const fn text(self) -> (&'static str, &'static str) {
+        match self {
+            Self::InvalidServer => (
+                "Enter the server's HTTPS address.",
+                "Use the address from your browser without anything after the hostname and optional port.",
+            ),
+            Self::Permission => (
+                self.message(),
+                "Check with a server administrator that this machine is allowed to join.",
+            ),
+            Self::Expired => (
+                self.message(),
+                "Run infraternal up again and approve the new code.",
+            ),
+            Self::Unreachable => (
+                "Couldn't reach the server over HTTPS.",
+                "Check the address and open it in your browser before retrying.",
+            ),
+            Self::Partial => (
+                "The machine joined, but setup stopped before it finished.",
+                "Run infraternal status to see what started before you retry.",
+            ),
+            Self::Unsupported => (
+                self.message(),
+                "Ask a server administrator to update the server before you retry.",
+            ),
+            Self::Throttled => (self.message(), "Wait before you request a new code."),
+            Self::Runtime | Self::Failed => (
+                "Couldn't complete the machine join.",
+                "Check the server address in your browser, then run infraternal up again.",
+            ),
+            Self::LocalState => (
+                "Couldn't read or write local infraternal files.",
+                "Check permissions and free disk space.",
+            ),
+            Self::SudoUnavailable => (
+                "Can't ask for administrator access because sudo is missing.",
+                "Install sudo, then run infraternal up again.",
+            ),
+            Self::SudoDenied => (
+                "Administrator access was denied.",
+                "Run infraternal up from an administrator account and approve the prompt.",
+            ),
+            Self::UntrustedTool => (
+                "Couldn't verify that the system tools are owned by root.",
+                "Ask an administrator to restore ownership before you retry.",
+            ),
+            Self::InstallConflict => (
+                "Can't install infraternal with this machine's current setup.",
+                "Resolve the conflict shown above, then run infraternal up again.",
+            ),
+            Self::HostFirewall => (
+                "The firewall settings are invalid.",
+                "Check the --host-firewall-allow format with infraternal up --help.",
+            ),
+            Self::NoSystemd => (
+                "This machine doesn't have systemd.",
+                "Run infraternal up on a machine that uses systemd.",
+            ),
+        }
+    }
+
+    /// Return the numeric status used by the privileged install handoff.
     const fn exit_code(self) -> u8 {
         self.exit().code()
     }
@@ -287,7 +351,11 @@ struct Handoff {
     admin_rules: Vec<String>,
 }
 
-struct ApprovedInvitation(JoinInvitation);
+/// The approved join, carrying its optional prior-install proof separately from the invitation.
+struct ApprovedInvitation(
+    JoinInvitation,
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))] bool,
+);
 
 impl ApprovedInvitation {
     fn wipe(&mut self) {
@@ -326,6 +394,11 @@ fn take_join_key(data: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
     crate::remote::retire_prepared_join_key(data).map_err(|_| Failure::LocalState)?;
     Ok(key)
 }
+
+/// Offer local retirement for a previous user installation after machine approval.
+#[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+#[path = "up_retire_previous.rs"]
+mod retire_previous;
 
 /// Request a fresh machine approval, wait for its one-use enrollment receipt, and install it.
 pub(crate) fn run(
@@ -433,12 +506,19 @@ pub(crate) fn run(
     if let Err(failure) = print_approval(json_output, &short_key, &approval.user_code, &link) {
         return fail(json_output, failure);
     }
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let old = retire_previous::inspect(json_output);
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let retirement_hint = old.as_ref().map(retire_previous::preference);
+    #[cfg(not(all(target_os = "linux", feature = "plugin-ssh")))]
+    let retirement_hint: Option<String> = None;
     let mut invitation = match runtime.block_on(wait_for_approval(
         &server,
         &approval,
         host_id,
         &origin,
         JoinMode::System,
+        retirement_hint.as_deref(),
     )) {
         Ok(invitation) => invitation,
         Err(failure) => return fail(json_output, failure),
@@ -447,10 +527,16 @@ pub(crate) fn run(
         Ok(payload) => payload,
         Err(failure) => return fail(json_output, failure),
     };
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let retire = old.filter(|plan| invitation.1 && retire_previous::confirm(plan));
     invitation.wipe();
     system_elevation_prompt().print_to_stderr(json_output);
     if let Err(failure) = invoke_sudo(&mut sudo, &payload) {
         return fail(json_output, failure);
+    }
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    if let Some(plan) = retire {
+        retire_previous::finish(&plan);
     }
     #[cfg(all(
         target_os = "linux",
@@ -467,13 +553,10 @@ pub(crate) fn run(
     } else {
         "This machine joined the server and its system service is active."
     };
-    let success_body = if host_firewall_service.is_some() {
-        format!(
-            "Machine joined as {hostname}.\nService: active\nHost input firewall: mesh input only (infraternal-firewall.service)\nCommand: {PATH_BINARY}"
-        )
-    } else {
-        format!("Machine joined as {hostname}.\nService: active\nCommand: {PATH_BINARY}")
-    };
+    let mut success_body = format!("Server   {origin}\nCommand  {PATH_BINARY}");
+    if host_firewall_service.is_some() {
+        success_body.push_str("\nFirewall  Filters incoming mesh traffic");
+    }
     emit(
         CommandResult::new(
             "up",
@@ -492,7 +575,9 @@ pub(crate) fn run(
                 "host_firewall_status": if host_firewall_service.is_some() { "active" } else { "unavailable" },
             }),
         )
-        .with_body(success_body),
+        .with_text_message(joined_message(&hostname))
+        .with_body(success_body)
+        .with_text_next(vec!["Check this machine with infraternal status.".to_owned()]),
         json_output,
         Exit::Ok,
     )
@@ -613,6 +698,8 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd).map_err(|_| Failure::Failed)?;
     let mut invitation = ApprovedInvitation(
         serde_json::from_slice(&handoff.invitation).map_err(|_| Failure::Permission)?,
+        #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+        false,
     );
     validate_invitation(&invitation.0, &origin, None, JoinMode::System)?;
     if crate::remote::key_digest_from_pkcs8(&handoff.key_pkcs8).ok() != Some(handoff.key_digest) {
@@ -748,6 +835,13 @@ fn shown_hostname(name: &str) -> String {
     }
 }
 
+/// Use the server inventory's hostname normalization for the join confirmation.
+fn joined_message(hostname: &str) -> String {
+    let name = infraternal_plugin_api::host_name::machine_name(hostname);
+    let machine = name.as_deref().unwrap_or("This machine");
+    format!("{machine} joined the server.")
+}
+
 /// The device-approval request body for one fresh machine, built by the shared sign-in crate
 /// from this join mode's wire text and execution uid.
 fn machine_start_body(
@@ -783,14 +877,19 @@ fn machine_key_short(fingerprint: &str) -> Option<String> {
     )
 }
 
+/// Pack two QR rows into each terminal line, with a four-module quiet zone.
 fn approval_qr(link: &str) -> Result<String, Failure> {
     let qr = QrCode::encode_text(link, QrCodeEcc::Low).map_err(|_| Failure::Failed)?;
     let size = qr.size();
     let mut rendered = String::new();
-    for y in -4..size + 4 {
+    for y in (-4..size + 4).step_by(2) {
         for x in -4..size + 4 {
-            let dark = x >= 0 && y >= 0 && x < size && y < size && qr.get_module(x, y);
-            rendered.push_str(if dark { "##" } else { "  " });
+            rendered.push(match (qr.get_module(x, y), qr.get_module(x, y + 1)) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
         }
         rendered.push('\n');
     }
@@ -825,27 +924,51 @@ fn needs_terminal(origin: &str, json_output: bool) -> ExitCode {
     )
 }
 
+/// Print the link and matching codes on the interactive stream used for approval.
 fn print_approval(
     json_output: bool,
     short_key: &str,
     user_code: &str,
     link: &str,
 ) -> Result<(), Failure> {
-    let qr = approval_qr(link)?;
-    if json_output {
-        eprintln!("Open this link and approve this machine with your passkey:\n{link}");
-        eprintln!("Code: {user_code}    Machine key: {short_key}");
-        eprintln!("{qr}");
-        eprintln!("Waiting for approval...");
-        io::stderr().flush().map_err(|_| Failure::Runtime)?;
+    use infraternal_plugin_api::present;
+    let options =
+        crate::cli::output::RenderOptions::detect(approval_display_is_terminal(json_output));
+    let details = format!("Code         {user_code}\nMachine key  {short_key}");
+    let codes = present::panel(&details, 0, options.usable_width(), options.terminal);
+    let qr = if options.terminal {
+        let qr = approval_qr(link)?;
+        if qr
+            .lines()
+            .next()
+            .is_some_and(|row| row.chars().count() <= options.width)
+        {
+            if options.color {
+                // A light quiet zone lets the same code scan against light and dark themes.
+                format!("\u{1b}[30;107m{qr}\u{1b}[0m")
+            } else {
+                qr
+            }
+        } else {
+            String::new()
+        }
     } else {
-        println!("Open this link and approve this machine with your passkey:\n{link}");
-        println!("Code: {user_code}    Machine key: {short_key}");
-        println!("{qr}");
-        println!("Waiting for approval...");
-        io::stdout().flush().map_err(|_| Failure::Runtime)?;
+        String::new()
+    };
+    let out = format!(
+        "Open this link to approve the machine with your passkey.\n{link}\n\n{codes}\n{qr}Waiting for approval.\n"
+    );
+    let write = |stream: &mut dyn Write| {
+        stream
+            .write_all(out.as_bytes())
+            .and_then(|()| stream.flush())
+    };
+    if json_output {
+        write(&mut io::stderr().lock())
+    } else {
+        write(&mut io::stdout().lock())
     }
-    Ok(())
+    .map_err(|_| Failure::Runtime)
 }
 
 /// Start machine approval and check the server returned the expected capability shapes.
@@ -872,6 +995,7 @@ async fn wait_for_approval(
     host_id: uuid::Uuid,
     origin: &str,
     join: JoinMode,
+    retirement_hint: Option<&str>,
 ) -> Result<ApprovedInvitation, Failure> {
     let deadline = Instant::now() + approval.lifetime;
     let body = Zeroizing::new(
@@ -895,7 +1019,7 @@ async fn wait_for_approval(
             server,
             "/auth/device-redeem",
             &body,
-            Some("wait=10"),
+            Some(retirement_hint.unwrap_or("wait=10")),
             remaining.min(POLL_INTERVAL + REQUEST_TIMEOUT),
         )
         .await
@@ -908,6 +1032,8 @@ async fn wait_for_approval(
             StatusCode::OK => {
                 let invitation = ApprovedInvitation(
                     serde_json::from_slice(&response.body).map_err(|_| Failure::Failed)?,
+                    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+                    response.retirement_authorized,
                 );
                 validate_invitation(&invitation.0, origin, Some(host_id), join)?;
                 return Ok(invitation);
@@ -932,7 +1058,7 @@ async fn post_json(
     server: &Url,
     path: &'static str,
     body: &[u8],
-    preference: Option<&'static str>,
+    preference: Option<&str>,
     timeout: Duration,
 ) -> Result<crate::remote::ClientResponse, Failure> {
     let mut request_started = false;
@@ -1343,17 +1469,16 @@ fn map_remote_failure(error: &io::Error) -> Failure {
     }
 }
 
+/// Report the join failure with the original script message and a human recovery step.
 fn fail(json_output: bool, failure: Failure) -> ExitCode {
-    if json_output {
-        emit(
-            CommandResult::new("up", failure.state(), failure.message(), json!({})),
-            true,
-            failure.exit(),
-        )
-    } else {
-        eprintln!("{}", failure.message());
-        ExitCode::from(failure.exit_code())
-    }
+    let (message, next) = failure.text();
+    emit(
+        CommandResult::new("up", failure.state(), failure.message(), json!({}))
+            .with_text_message(message)
+            .with_text_next(vec![next.to_owned()]),
+        json_output,
+        failure.exit(),
+    )
 }
 
 /// Local enrollment, privilege, and transactional installation regressions.
@@ -1433,20 +1558,33 @@ mod tests {
         }
     }
 
+    /// Each half block represents the same QR bits as the underlying matrix.
     #[test]
-    fn approval_qr_renders_a_square_matrix_with_a_four_module_quiet_zone() {
+    fn approval_qr_renders_half_blocks_with_a_quiet_zone() {
         let link = "https://mesh.example.org/#join=AbCdEfGhIjKlMnOp";
         let rendered = approval_qr(link).unwrap();
         let rows = rendered.lines().collect::<Vec<_>>();
-        let quiet_zone = " ".repeat(8);
+        let qr = qrcodegen::QrCode::encode_text(link, qrcodegen::QrCodeEcc::Low).unwrap();
+        let size = usize::try_from(qr.size()).unwrap();
+        assert_eq!(rows.len(), (size + 8).div_ceil(2));
+        for (row, text) in rows.iter().enumerate() {
+            assert_eq!(text.chars().count(), size + 8);
+            for (column, glyph) in text.chars().enumerate() {
+                let x = i32::try_from(column).unwrap() - 4;
+                let y = i32::try_from(row * 2).unwrap() - 4;
+                assert_eq!(matches!(glyph, '█' | '▀'), qr.get_module(x, y));
+                assert_eq!(matches!(glyph, '█' | '▄'), qr.get_module(x, y + 1));
+            }
+        }
+    }
 
-        assert_eq!(rows.len(), 37);
-        assert!(rows.iter().all(|row| row.len() == 74));
-        assert_eq!(rows.first(), Some(&" ".repeat(74).as_str()));
-        assert_eq!(rows.last(), Some(&" ".repeat(74).as_str()));
-        assert!(
-            rows.iter()
-                .all(|row| { row.starts_with(&quiet_zone) && row.ends_with(&quiet_zone) })
+    /// The join confirmation shows the same short machine label as inventory.
+    #[test]
+    fn joined_confirmation_uses_the_inventory_name() {
+        assert_eq!(super::joined_message("MBP.local"), "mbp joined the server.");
+        assert_eq!(
+            super::joined_message("localhost"),
+            "This machine joined the server."
         );
     }
 

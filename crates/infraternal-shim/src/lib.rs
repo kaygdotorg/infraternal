@@ -6,7 +6,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod child;
-#[cfg(all(feature = "host-login", target_os = "linux"))]
+#[cfg(any(all(feature = "host-login", target_os = "linux"), target_os = "macos"))]
 mod cleanup;
 #[cfg(all(feature = "host-diagnostics", target_os = "linux"))]
 mod host_trace;

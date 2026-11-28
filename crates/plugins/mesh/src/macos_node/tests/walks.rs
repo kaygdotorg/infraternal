@@ -256,6 +256,7 @@ fn changed_authority_rebuilds_peers_and_restarts_candidate_walks() {
     fixture.config.authority_epoch = Some(super::AUTHORITY_EPOCH_B.to_owned());
     fixture
         .node
+        .test_state()
         .worker
         .as_ref()
         .expect("running worker")

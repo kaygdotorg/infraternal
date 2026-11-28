@@ -2032,6 +2032,9 @@ async fn backed_discovery_keeps_control_cancellation_and_udp_recovery_bounded() 
                     std::task::Poll::Ready(Steered::Replaced(..)) => {
                         panic!("QUIC discovery replaced its own link")
                     }
+                    std::task::Poll::Ready(Steered::Retired(_)) => {
+                        panic!("the peer never sent a retirement frame")
+                    }
                     std::task::Poll::Pending => std::task::Poll::Ready(false),
                 })
                 .await;

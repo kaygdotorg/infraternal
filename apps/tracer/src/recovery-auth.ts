@@ -10,9 +10,10 @@ const MAX_RECOVERY_WAIT_SECONDS = 48 * 60 * 60;
 export interface RecoveryRequest { token: string; delay_seconds: number; ready_at: number }
 export interface RecoveryStatus { ready: boolean; delay_seconds: number; ready_at: number }
 
+/** Checks that the server's recovery wait duration and ready timestamp fall within policy bounds. */
 function validateWait(result: Pick<RecoveryRequest, "delay_seconds" | "ready_at">): void {
   if (!Number.isSafeInteger(result.delay_seconds) || result.delay_seconds < 0 || result.delay_seconds > MAX_RECOVERY_WAIT_SECONDS || !Number.isSafeInteger(result.ready_at) || result.ready_at <= 0) {
-    throw new AuthError("The server's answer could not be used. Try again.");
+    throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   }
 }
 
@@ -21,7 +22,7 @@ export async function getRecoveryStatus(token: string): Promise<RecoveryStatus> 
   const result = await auth.post<RecoveryStatus>("recovery-status", { token });
   validateWait(result);
   if (typeof result.ready !== "boolean" || result.ready !== (result.delay_seconds === 0)) {
-    throw new AuthError("The server's answer could not be used. Try again.");
+    throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   }
   return result;
 }

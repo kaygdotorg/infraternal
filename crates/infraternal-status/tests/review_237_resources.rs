@@ -5,6 +5,7 @@
 use infraternal_status::{Activity, Roots, probe_local};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
+/// Keep service rows when OS resource limits prevent a query worker from starting.
 #[test]
 fn thread_resource_refusal_preserves_a_status_answer() {
     if let Some(root) = std::env::var_os("STATUS_RESOURCE_REVIEW_ROOT") {
@@ -14,6 +15,7 @@ fn thread_resource_refusal_preserves_a_status_answer() {
                 system_units: vec![root.join("units")],
                 user_units: None,
                 run_dir: None,
+                system_run_dir: None,
                 data_dirs: vec![],
                 net_class: root.join("net"),
             },

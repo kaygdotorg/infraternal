@@ -198,7 +198,7 @@ test("a setting has one heading named like its Settings title, and its default a
     try { return await buildDocs(resolve(out, "docs")); } finally { await rm(out, { recursive: true, force: true }); }
   })();
   const headings = index.flatMap((entry) => entry.headings.map((heading) => ({ page: entry.slug, ...heading })));
-  for (const title of ["Offer To Switch", "Keys Last", "Browsers Stay Signed In For", "Add Link Lasts", "Join Code Lasts", "Connection Keys", "Machine Identity", "Renewal Grace Period"]) {
+  for (const title of ["Offer to switch", "Keys last", "Browser session length", "Add link lasts", "Join code lasts", "Connection keys", "Machine identity", "Renewal grace period"]) {
     const found = headings.filter((heading) => heading.text === title);
     expect(found.length, `${title}: exactly one heading`).toBe(1);
     expect(found[0]!.facts, `${title}: quick facts with the default`).toMatch(/\bdefault\b/i);

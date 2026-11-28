@@ -120,6 +120,71 @@ impl EnrollmentStore {
         })
     }
 
+    /// Confirm that this exact certificate belongs to a permanently retired install.
+    ///
+    /// Preserve pending cleanup, temporary admission barriers and same-uid
+    /// certificate rotations. An unknown fingerprint cannot prove retirement.
+    pub(crate) async fn installation_retired(
+        &self,
+        fingerprint: &[u8; 32],
+    ) -> Result<bool, EnrollmentError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM remote_certificates c
+             JOIN remote_hosts h ON c.host_id=h.id
+             WHERE c.fingerprint=? AND h.mode IN ('rootless','rootful')
+             AND ((h.revoked_at IS NOT NULL AND NOT EXISTS(
+                 SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0
+             ) AND NOT EXISTS(
+                 SELECT 1 FROM remote_host_promotions p WHERE p.host_id=h.id AND p.cleanup='uninstall'
+             )) OR (h.mode='rootful' AND c.role='active' AND c.execution_uid>0
+                 AND c.revoked_at IS NOT NULL)))",
+        )
+        .bind(fingerprint.as_slice())
+        .fetch_one(&self.0)
+        .await?)
+    }
+
+    /// Match an earlier bootstrap's local enrollment to the same person's retired host.
+    /// The exact mode, execution uid and newest certificate key bind the old install.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn retired_bootstrap_matches(
+        &self,
+        owner: &str,
+        host: Uuid,
+        uid: u32,
+        digest: &[u8; 32],
+    ) -> Result<bool, EnrollmentError> {
+        let key = self.retired_bootstrap_key(owner, host, uid).await?;
+        Ok(key.is_some_and(|key| openssl::sha::sha256(&key) == *digest))
+    }
+
+    /// Look up a retired enrollment by owner, host, and Unix account before runtime inspection.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn retired_bootstrap_key(
+        &self,
+        owner: &str,
+        host: Uuid,
+        uid: u32,
+    ) -> Result<Option<[u8; 32]>, EnrollmentError> {
+        let key: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT c.public_key FROM remote_hosts h
+             JOIN remote_certificates c ON c.host_id=h.id
+             WHERE h.owner_id=? AND h.id=? AND h.execution_uid=?
+               AND h.mode IN ('rootless','rootful') AND c.execution_uid=h.execution_uid
+               AND c.role='active' AND c.key_algorithm='ed25519'
+               AND (h.revoked_at IS NOT NULL OR EXISTS(
+                   SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id AND r.owner_id=h.owner_id
+               ))
+             ORDER BY c.not_before DESC LIMIT 1",
+        )
+        .bind(owner)
+        .bind(host.as_bytes().as_slice())
+        .bind(i64::from(uid))
+        .fetch_optional(&self.0)
+        .await?;
+        Ok(key.and_then(|key| key.try_into().ok()))
+    }
+
     /// Admit a pending or retired host only for retained cleanup, never new work.
     /// The certificate must still be exact, valid and individually unrevoked.
     pub(crate) async fn admit_cleanup(
@@ -624,6 +689,19 @@ pub(crate) mod tests {
             .await
             .unwrap();
         (store, pool, host)
+    }
+
+    /// Record the final cleanup receipt for a fixture with the legacy owner name.
+    /// This name cannot send the production UUID-based receipt itself.
+    pub(crate) async fn finish_fixture_cleanup(pool: &sqlx::SqlitePool, host: Uuid) {
+        let receipt = sqlx::query(
+            "UPDATE remote_login_cleanup SET confirmed=1 WHERE host_id=? AND confirmed=0",
+        )
+        .bind(host.as_bytes().as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+        assert_eq!(receipt.rows_affected(), 1);
     }
 
     /// Turns the fixture's enrolled host into a `device` row (#580) so a test can give

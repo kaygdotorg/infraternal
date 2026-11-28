@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Orchestrator test-deploy hook. Run a reviewed checkout on compute01 with its existing test passkey helper.
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+sha=${1:?pass the deployed full commit SHA}
+fixture=${2:?pass the absolute test fixture configuration path}
+[[ $sha =~ ^[0-9a-f]{40}$ && $# == 2 && $fixture = /* && -r $fixture ]]
+export OWNER_JOURNEYS_DEPLOY_SHA=$sha
+# This is a test-deploy receipt. Its result travels back to the orchestrator even when a journey fails.
+exec "$HOME/infraternal-ops/build-slot" "$root/scripts/owner-journeys" --fixture "$fixture"

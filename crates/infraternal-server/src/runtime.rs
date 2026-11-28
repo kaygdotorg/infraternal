@@ -746,16 +746,6 @@ async fn build_router_core(
     // An injected actor's caller owns node-worker startup. Production starts
     // the process and binds admitted node workers after persisted switches load.
     let owns_node_workers = supplied_agent.is_none();
-    // The periodic update check and the quiet-window apply (#211 S3, S4) belong to the
-    // production process only. They start nothing outside root release builds.
-    #[cfg(feature = "release")]
-    if owns_node_workers {
-        drop(crate::release_latest::start_updates(
-            pool.clone(),
-            &config.data_dir,
-            config.listen,
-        ));
-    }
     // Periodic batched pruning of closed terminal_sessions rows older than 30 days (#571, #579).
     if owns_node_workers {
         drop(crate::terminal_session_prune::start(
@@ -774,12 +764,26 @@ async fn build_router_core(
     let agent = if let Some(agent) = supplied_agent {
         agent
     } else {
-        // Resolve the exact running inode in the spawn child, including sealed
-        // replacement images whose display name is not an executable pathname.
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "release"))]
+        let executable = {
+            let data = config.data_dir.clone();
+            tokio::task::spawn_blocking(move || crate::embedded_image::executable(&data))
+                .await
+                .map_err(|_| ServerError::InvalidConfiguration)?
+        };
+        #[cfg(all(target_os = "linux", not(feature = "release")))]
         let executable = std::path::PathBuf::from("/proc/self/exe");
         #[cfg(not(target_os = "linux"))]
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
+        // The production updater also uses the embedded executable for its
+        // login-image trial. It starts nothing outside root release builds.
+        #[cfg(feature = "release")]
+        drop(crate::release_latest::start_updates(
+            pool.clone(),
+            &config.data_dir,
+            config.listen,
+            executable.clone(),
+        ));
         #[cfg(target_os = "linux")]
         {
             let legacy_state = infraternal_agent::sessions::state_path(None).map_err(|error| {

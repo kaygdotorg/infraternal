@@ -259,13 +259,17 @@ validate_upgrade_stage() {
  [ ! -e "$stage/activating" ] || [ ! -e "$stage/failed" ] || refuse marker
  [ -f "$stage/activating" ] || [ -f "$stage/failed" ] || refuse marker
 }
-validate_upgrade_root() {
+# Read the install owner's marker and the base inode without running its payload.
+read_bootstrap_owner() {
  [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && private_base_mode || exit 71
  private_file "$base/.bootstrap-owner"
  [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || refuse owner
  previous_host=$(cat "$base/.bootstrap-owner")
  hex_id "$previous_host"
  identity=$(stat -c '%d:%i' "$base")
+}
+validate_upgrade_root() {
+ read_bootstrap_owner
  [ -d "$base/bin" ] && [ ! -L "$base/bin" ] && [ -O "$base/bin" ] && [ "$(stat -c '%a' "$base/bin")" = 700 ] || exit 71
  [ -f "$base/bin/live" ] && [ ! -L "$base/bin/live" ] && [ -O "$base/bin/live" ] || exit 71
  case "$(stat -c '%a:%h' "$base/bin/live")" in
@@ -1355,10 +1359,14 @@ take_over_finished_install() {
  takeover_expected=$1
  takeover_token=$2
  hex_id "$takeover_token"
- [ "$base" = "$up_root_base" ] || exit 71
+ [ "$base" = "$up_root_base" ] || [ "${retirement_approved:-no}" = yes ] || exit 71
  setup_guard
  refuse_cancelled "$takeover_token"
- takeover_observed=$(inspect_previous)
+ if [ "${retirement_approved:-no}" = yes ]; then
+  takeover_observed=$(retirement_installed "$host" "$retirement_identity")
+ else
+  takeover_observed=$(inspect_previous)
+ fi
  set -- $takeover_expected
  [ "$#" -ge 5 ] && [ "$1" = INFRATERNAL_SETUP_INSTALLED ] && [ "$5" = ready ] || exit 75
  takeover_host=$2

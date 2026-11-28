@@ -66,6 +66,11 @@ use tokio::{
 /// still relayed in order from the snapshot cursor.
 const KEY_REPAINT_GRACE: std::time::Duration = std::time::Duration::from_millis(2);
 
+/// Explicit session ends wait for shell exit without borrowing launch or renewal capacity.
+const MAX_ENDING_TERMINALS: usize = 4;
+/// Bound a hung shim handshake or exit so it cannot hold an end slot indefinitely.
+const TERMINAL_END_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// Wait for a relay operation while its active repaint still has time to finish.
 ///
 /// Prefer expiry when both become ready. The relay drops the old shim link
@@ -506,7 +511,12 @@ fn open_refusal(error: &io::Error) -> infraternal_plugin_api::admission::OpenRef
         return OpenRefusal::ProbeTimeout;
     }
     match (RootlessRefusal::of(error), error.kind()) {
-        (Some(RootlessRefusal::NoMatchingLogin), _) => OpenRefusal::NoLogin,
+        (Some(RootlessRefusal::NoMatchingLogin), _) => OpenRefusal::NoLogin {
+            execution_uid: None,
+        },
+        (Some(RootlessRefusal::ExecutionAccountMissing(uid)), _) => OpenRefusal::NoLogin {
+            execution_uid: Some(uid),
+        },
         (Some(RootlessRefusal::OtherAccount), _) => OpenRefusal::Permission,
         (
             None,
@@ -587,6 +597,17 @@ mod refusal_tests {
         );
     }
 
+    /// The host identifies an absent execution account by its enrolled UID.
+    #[test]
+    fn a_missing_execution_account_reports_its_uid() {
+        assert_eq!(
+            open_refusal(&missing_execution_account(501)),
+            OpenRefusal::NoLogin {
+                execution_uid: Some(501),
+            }
+        );
+    }
+
     /// A root host without systemd names its own reason, not "try again" (D354).
     #[test]
     fn a_root_host_without_systemd_names_why_it_cannot_log_in() {
@@ -594,6 +615,7 @@ mod refusal_tests {
         assert_eq!(open_refusal(&refused), OpenRefusal::NoSystemd);
     }
 
+    /// A user-mode host distinguishes a missing named login from a forbidden account switch.
     #[test]
     fn rootless_host_names_why_it_cannot_log_in() {
         if nix::unistd::Uid::effective().is_root() {
@@ -602,7 +624,12 @@ mod refusal_tests {
         }
         // A person whose name is no account here: a root host would fall back to root, a rootless one cannot.
         let absent = crate::logins::account("j142-no-such-account").unwrap_err();
-        assert_eq!(open_refusal(&absent), OpenRefusal::NoLogin);
+        assert_eq!(
+            open_refusal(&absent),
+            OpenRefusal::NoLogin {
+                execution_uid: None
+            }
+        );
         // An account that exists but is not this infraternal agent's own.
         let other = crate::logins::account("root").unwrap_err();
         assert_eq!(open_refusal(&other), OpenRefusal::Permission);
@@ -972,6 +999,14 @@ fn login_access_allows(
     }
 }
 
+/// Name the enrolled account by UID when the host can no longer resolve its name.
+fn missing_execution_account(uid: u32) -> io::Error {
+    if uid == 0 {
+        return io::Error::other("login account absent");
+    }
+    crate::logins::RootlessRefusal::ExecutionAccountMissing(uid).denied()
+}
+
 /// Apply trusted server authority, resolve the account and fence shell creation.
 /// A positive login snapshot never clears a pending or persisted revocation.
 async fn open_requested(
@@ -1008,7 +1043,7 @@ async fn open_requested(
             (
                 nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(input.uid))
                     .map_err(io::Error::from)?
-                    .ok_or_else(|| io::Error::other("login account absent"))?,
+                    .ok_or_else(|| missing_execution_account(input.uid))?,
                 false,
             )
         };
@@ -1564,6 +1599,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
             // authenticated peer. Established idle channels have no timer.
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 let hello = receive.next(socket).await?;
+                infraternal_link::supervisor::check_retirement(hello.stream_id, &hello.frame)?;
                 if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, caps, .. } if socket.native_stream_id().is_none() || caps & infraternal_plugin_api::channel::REMOTE_WRITER_BINDING != 0) {
                     return Err(sessions::invalid("remote control Hello required"));
                 }
@@ -1577,6 +1613,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
         let mut streams: HashMap<u32, Stream> = HashMap::new();
         let mut jobs: JoinSet<(u32, io::Result<()>)> = JoinSet::new();
         let mut renewals = JoinSet::new();
+        let mut terminal_ends = JoinSet::new();
         // A root upgrade's `privilege.*` calls have their own small lane, so
         // a stuck relay can never hold up certificate renewal or terminal
         // startup (J415 B4). Each call is also bounded in time. Builds
@@ -1658,6 +1695,14 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                     let (call_id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| sessions::invalid("missing renewal task"))?.map_err(io::Error::other)?;
                     let (ok, json) = match result { Ok(json) => (true, json), Err(_) => (false, b"{}".to_vec()) };
                     reply(&control, Message::Result(0, call_id, ok, json))?;
+                }
+                result = terminal_ends.join_next(), if !SESSION_ONLY && control_ready && !terminal_ends.is_empty() => {
+                    let (call_id, status) = result.ok_or_else(|| sessions::invalid("missing terminal end task"))?.map_err(io::Error::other)?;
+                    let json = match status {
+                        Some(status) => serde_json::to_vec(&status)?,
+                        None => b"{}".to_vec(),
+                    };
+                    reply(&control, Message::Result(0, call_id, status.is_some(), json))?;
                 }
                 result = join_privilege(&mut privileges), if !SESSION_ONLY && control_ready && !privileges.is_empty() => {
                     let (call_id, result) = result.ok_or_else(|| sessions::invalid("missing privilege task"))?.map_err(io::Error::other)?;
@@ -1777,6 +1822,24 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             } else {
                                 let exe = exe.clone(); let state = state.clone(); let input = input_json.to_vec();
                                 renewals.spawn(async move { (call_id, crate::startup_guard::execute(&exe, &state, &input, execution_uid).await) });
+                            }
+                        }
+                        Frame::Call {call_id, action_id: "terminal.end", input_json} if !SESSION_ONLY && stream == 0 => {
+                            // Leg A resolves ownership and routing before asking this trusted host link.
+                            if input_json.len() == 36 + 2 && terminal_ends.len() < MAX_ENDING_TERMINALS
+                                && let Ok(id) = serde_json::from_slice::<uuid::Uuid>(input_json)
+                            {
+                                let id = id.into_bytes();
+                                let path = registry.get(&id).cloned().unwrap_or_else(|| sessions::rendezvous(&state, id));
+                                terminal_ends.spawn(async move {
+                                    let status = tokio::time::timeout(
+                                        TERMINAL_END_TIMEOUT,
+                                        sessions::end_terminal(path, id),
+                                    ).await.ok().and_then(Result::ok);
+                                    (call_id, status)
+                                });
+                            } else {
+                                reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
                             }
                         }
                         Frame::Call {call_id, action_id, input_json} if !SESSION_ONLY && plugin_calls.is_some() && stream == 0 => {

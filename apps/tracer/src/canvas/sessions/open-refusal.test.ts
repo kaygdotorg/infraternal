@@ -37,7 +37,7 @@ test("product copy names the host and counters and never renders untrusted serve
     message: "monitor01 is low on memory (180 MiB free, 212 sessions running). Close sessions you no longer need.", sessionList: true, action: "sessions",
   });
   expect(terminalRefusal(new ActionRefused(undefined, "internal input: do not render"), "monitor01")).toEqual({
-    message: "The server could not open this terminal. Try again.", sessionList: false, action: "retry",
+    message: "Couldn't open this terminal. Check your connection and try again.", sessionList: false, action: "retry",
   });
   expect(terminalRefusal(new ActionRefused(undefined, "invalid")).sessionList).toBe(false);
 });
@@ -58,6 +58,23 @@ test("a rootless server says why it cannot open a shell and what to do (#327)", 
   expect(terminalRefusal(await refusal({ reason: "invalid" })).message).toBe("This terminal request is not valid. Try opening a new window.");
 });
 
+/** A routed refusal names the Mac and the execution account, with a recovery step. */
+test("a remote user-mode refusal identifies the host and missing account", async () => {
+  const { terminalRefusal } = await import("../../terminal-refusal");
+  expect(terminalRefusal(await refusal({ reason: "no_login", execution_uid: 501 }), "mac-build", true)).toEqual({
+    message: "mac-build couldn't open a shell as the account with user ID 501. Check the account on mac-build, then try again.",
+    sessionList: false, action: "retry",
+  });
+  expect(terminalRefusal(await refusal({ reason: "no_login", execution_uid: "untrusted text" }), "mac-build", true)).toEqual({
+    message: "mac-build couldn't open a shell as its own account. Check the account on mac-build, then try again.",
+    sessionList: false, action: "retry",
+  });
+  expect(terminalRefusal(await refusal({ reason: "permission" }), "mac-build", true)).toEqual({
+    message: "mac-build cannot open a shell as the requested account. Check which account runs infraternal on mac-build, then try again.",
+    sessionList: false, action: "retry",
+  });
+});
+
 test("a root host without systemd says why it opens no logins and what works instead (D354)", async () => {
   const { terminalRefusal } = await import("../../terminal-refusal");
   expect(terminalRefusal(await refusal({ error: "terminal unavailable", reason: "no_systemd" }), "build-01")).toEqual({
@@ -69,7 +86,7 @@ test("a root host without systemd says why it opens no logins and what works ins
 test("a host too busy to start a shell says so and offers to try again", async () => {
   const { terminalRefusal } = await import("../../terminal-refusal");
   expect(terminalRefusal(await refusal({ error: "terminal unavailable", reason: "probe_timeout" }), "build-01")).toEqual({
-    message: "build-01 was too busy to start a shell just now. Try again in a moment.", sessionList: false, action: "retry",
+    message: "build-01 is too busy to start a shell. Try again in a moment.", sessionList: false, action: "retry",
   });
 });
 

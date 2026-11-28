@@ -144,13 +144,13 @@ test("⌘K has one row per group and one per setting, and a setting is findable 
   const entries = entriesOf(visibleMap(true), (s) => defaultValue(s.spec), () => true);
   const groups = spots(SETTINGS_MAP).length, settings = spots(SETTINGS_MAP).reduce((n, s) => n + (s.group.settings?.length ?? 0), 0);
   expect(entries.length).toBe(groups + settings);
-  expect(entries.find((e) => e.hint.includes("wireguard"))?.label).toBe("Connection Keys");
+  expect(entries.find((e) => e.hint.includes("wireguard"))?.label).toBe("Connection keys");
   expect(entries.find((e) => e.action === "canvas:settings:mesh.keys")?.label).toBe("Mesh › Keys");
 });
 
 test("⌘K offers a setting only when something stores it", () => {
   const entries = entriesOf(visibleMap(true), (s) => defaultValue(s.spec), (id) => id === "app-key");
-  expect(entries.filter((e) => e.action.split(".").length === 3).map((e) => e.label)).toEqual(["Keys Last"]);
+  expect(entries.filter((e) => e.action.split(".").length === 3).map((e) => e.label)).toEqual(["Keys last"]);
   expect(entries.length).toBe(spots(SETTINGS_MAP).length + 1);
 });
 

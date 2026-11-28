@@ -797,6 +797,65 @@ impl Backend for RemoteBackend {
             Ok(!working)
         })
     }
+    /// Only this person's retired host, proved by the same local enrollment key and uid.
+    fn owns_retired_install<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: Uuid,
+        uid: u32,
+        digest: [u8; 32],
+    ) -> Operation<'a, bool> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            self.issuer
+                .store()
+                .retired_bootstrap_matches(&authority.owner, host, uid, &digest)
+                .await
+                .map_err(|_| unavailable())
+        })
+    }
+
+    /// A host marker can authorize runtime inspection only for this owner's retired enrollment.
+    fn owns_retired_install_marker<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: Uuid,
+        uid: u32,
+    ) -> Operation<'a, bool> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            self.issuer
+                .store()
+                .retired_bootstrap_key(&authority.owner, host, uid)
+                .await
+                .map(|key| key.is_some())
+                .map_err(|_| unavailable())
+        })
+    }
+
+    /// Only this owner's removed host rows can lead to an alternate-scope check.
+    fn retired_install_uids<'a>(&'a self, authority: &'a Authority) -> Operation<'a, Vec<u32>> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            let ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT DISTINCT h.execution_uid FROM remote_hosts h
+                 WHERE h.owner_id=? AND h.mode IN ('rootless','rootful') AND h.execution_uid>=0
+                   AND (h.revoked_at IS NOT NULL OR EXISTS(
+                       SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id AND r.owner_id=h.owner_id
+                   ))
+                 ORDER BY h.execution_uid LIMIT 16",
+            )
+            .bind(&authority.owner)
+            .fetch_all(&self.issuer.store().0)
+            .await
+            .map_err(|_| unavailable())?;
+            Ok(ids
+                .into_iter()
+                .filter_map(|uid| u32::try_from(uid).ok())
+                .collect())
+        })
+    }
+
     fn owns_failed_setup<'a>(
         &'a self,
         authority: &'a Authority,
@@ -1275,15 +1334,16 @@ fn route_unavailable() -> Failure {
     Failure::install("The infraternal agent did not connect. Check the host's service and network.")
 }
 
+/// Confirms an enrolled host can open its selected login before add-host completes.
 async fn confirm_preferred_login(
     actor: &EmbeddedAgent,
     person: Uuid,
-    account: String,
+    account: Option<String>,
     grant: crate::embedded::LoginGrant,
 ) -> Result<(), Failure> {
     // The PTY probe alone bypasses preferred account/PAM admission. Reuse the
     // exact preparation path used before real terminal opens, after restoration.
-    tokio::time::timeout(Duration::from_secs(10), actor.prepare_login(person, Some(account), grant))
+    tokio::time::timeout(Duration::from_secs(10), actor.prepare_login(person, account, grant))
         .await.map_err(|_| unavailable())?.map_err(|_| Failure::install(
             "The host connected, but its preferred account login could not open. Check the host login path and try again."))
 }
@@ -1753,8 +1813,7 @@ async fn canary_output(
             TerminalOutput::Ack { .. }
             | TerminalOutput::Reconnecting
             | TerminalOutput::LinkDoubt
-            | TerminalOutput::Recovered
-            | TerminalOutput::RouteExpired => {}
+            | TerminalOutput::Recovered => {}
         }
     }
     Err(unavailable())

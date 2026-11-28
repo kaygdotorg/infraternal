@@ -554,19 +554,28 @@ async fn execute(
         "device-redeem" => {
             let b: Token = body(value)?;
             #[cfg(feature = "remote")]
-            if headers
+            let preference = headers
                 .get("prefer")
-                .is_some_and(|value| value == "wait=10")
-            {
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            #[cfg(feature = "remote")]
+            if preference.split(',').any(|value| value.trim() == "wait=10") {
                 auth.wait_for_device_join(&b.token, now, std::time::Duration::from_secs(10))
                     .await?;
                 // Approval, session validity and receipt lifetime are all checked at wake.
-                return redeem_machine_join(auth, invitation_issuer, &b.token, current_time(auth)?)
-                    .await;
+                return redeem_machine_join(
+                    auth,
+                    invitation_issuer,
+                    &b.token,
+                    current_time(auth)?,
+                    preference,
+                )
+                .await;
             }
             #[cfg(feature = "remote")]
             if auth.device_join_approved(&b.token, now).await? {
-                return redeem_machine_join(auth, invitation_issuer, &b.token, now).await;
+                return redeem_machine_join(auth, invitation_issuer, &b.token, now, preference)
+                    .await;
             }
             serde_json::to_value(infraternal_sign_in::DeviceRedeemResponse {
                 api_key: zeroize::Zeroizing::new(auth.device_redeem(&b.token, now).await?),
@@ -682,9 +691,23 @@ async fn redeem_machine_join(
     issuer: Option<&crate::remote_http::InvitationIssuer>,
     token: &str,
     now: i64,
+    preference: &str,
 ) -> super::Result<Response> {
     let approval = auth.approved_device_join(token, now).await?;
     let issuer = issuer.ok_or(Error::RemoteUnavailable)?;
+    // The old host's owner is the person who approved this join with a passkey.
+    // The hint grants no deletion authority on the server and no host details.
+    let allow_retirement = if approval.request.mode == "system"
+        && let Some((host, uid, digest)) = retirement_hint(preference)
+    {
+        issuer
+            .store()
+            .retired_bootstrap_matches(&approval.user_id, host, uid, &digest)
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
     let invitation = issuer
         .issue_approved_machine_join(token, approval, now)
         .await
@@ -693,7 +716,44 @@ async fn redeem_machine_join(
             StatusCode::BAD_REQUEST => Error::Invalid,
             _ => Error::RemoteUnavailable,
         })?;
-    Ok(Json(invitation).into_response())
+    let mut response = Json(invitation).into_response();
+    if allow_retirement {
+        response.headers_mut().insert(
+            "infraternal-retired-install",
+            HeaderValue::from_static("yes"),
+        );
+    }
+    Ok(response)
+}
+
+/// Decode the optional old user install hint from a machine approval poll.
+#[cfg(feature = "remote")]
+fn retirement_hint(preference: &str) -> Option<(uuid::Uuid, u32, [u8; 32])> {
+    use base64::Engine;
+
+    let mut values = preference.split(',').filter_map(|field| {
+        field
+            .trim()
+            .strip_prefix("old-install=\"")?
+            .strip_suffix('"')
+    });
+    let mut fields = values.next()?.split('/');
+    let (Some(host), Some(uid), Some(digest), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return None;
+    };
+    if values.next().is_some() || host.len() != 32 || digest.len() != 43 {
+        return None;
+    }
+    let uid = uid.parse::<u32>().ok().filter(|uid| *uid != 0)?;
+    let host = uuid::Uuid::parse_str(host).ok()?;
+    let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(digest)
+        .ok()?
+        .try_into()
+        .ok()?;
+    Some((host, uid, digest))
 }
 
 /// Check the pinned browser Origin and apply the enclosing-network budget to public requests.

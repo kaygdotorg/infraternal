@@ -26,6 +26,9 @@ pub const SESSION_GONE_REASON: &str = "session ended";
 
 const MAX_VARINT_BYTES: usize = 5;
 
+/// Leg B control close sent before Hello by the authenticated server for a retired installation.
+pub const CLOSE_INSTALL_RETIRED: u16 = 4410;
+
 /// A decoded frame borrows its variable-sized fields from the input buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame<'a> {

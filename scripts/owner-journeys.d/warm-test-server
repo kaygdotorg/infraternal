@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Run a staged, signed warm update against only the test service's private control socket.
+set -euo pipefail
+[[ $# == 4 && $1 == apply && $2 == https://test.ssh.kayg.org ]]
+candidate=$3
+version=$4
+[[ $candidate = /* && -x $candidate && $version =~ ^edge-[0-9]{8}T[0-9]{6}Z$ ]]
+data=/var/lib/infraternal-test
+unit=infraternal-test.service
+systemctl is-active --quiet "$unit"
+pid=$(systemctl show --property=MainPID --value "$unit")
+[[ $pid =~ ^[1-9][0-9]*$ && -S "$data/restart/control.sock" ]]
+# Check the actual running argv, also accepting --option=value, before addressing the socket.
+mapfile -d '' -t running < "/proc/$pid/cmdline"
+data_match=false
+origin_match=false
+for ((offset=0; offset<${#running[@]}; offset++)); do
+    case ${running[offset]} in
+        "--data=$data") data_match=true ;;
+        --data) [[ ${running[offset+1]:-} != "$data" ]] || data_match=true ;;
+        "--public-origin=$2") origin_match=true ;;
+        --public-origin) [[ ${running[offset+1]:-} != "$2" ]] || origin_match=true ;;
+    esac
+done
+if [[ $data_match != true || $origin_match != true ]]; then
+    echo 'The live test unit does not identify the test data directory and test HTTPS origin' >&2
+    exit 1
+fi
+exec "$candidate" server update apply "$version" --data "$data"

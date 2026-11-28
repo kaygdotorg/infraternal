@@ -35,6 +35,69 @@ impl Drop for StateDirectory {
     }
 }
 
+/// A previously enrolled infraternal agent exits its retry loop on a final
+/// response from the authenticated server over either direct carrier.
+#[tokio::test]
+async fn retirement_ends_the_remote_supervisor() {
+    use crate::transport::Transmit;
+
+    let ca = root();
+    let server_identity = leaf(&ca, true);
+    let node = leaf(&ca, false);
+    let roots = std::slice::from_ref(&ca.certificate);
+    let close = Frame::Close {
+        code: infraternal_protocol::CLOSE_INSTALL_RETIRED,
+        reason: "This installation was retired.",
+    };
+    for quic in [true, false] {
+        let state = StateDirectory::new();
+        let (listener, udp) = reserve_transport_pair().await;
+        let identity = supervisor_identity(&ca, &node, listener.local_addr().unwrap());
+        let server = async {
+            if quic {
+                let endpoint = quinn::Endpoint::new(
+                    quinn::EndpointConfig::default(),
+                    Some(remote_quic::server_config(&server_identity, roots).unwrap()),
+                    udp.into_std().unwrap(),
+                    std::sync::Arc::new(quinn::TokioRuntime),
+                )
+                .unwrap();
+                let connection = endpoint.accept().await.unwrap().await.unwrap();
+                let (send, receive) = connection.accept_bi().await.unwrap();
+                let channel = NativeChannel::control(send, receive).unwrap();
+                assert!(matches!(
+                    Receive::default().next(&channel).await.unwrap().frame,
+                    Frame::Hello { .. }
+                ));
+                Transmit::default().send(&channel, 0, &close).await.unwrap();
+                // Keep the endpoint alive until the client consumes this frame.
+                std::future::pending::<()>().await;
+            } else {
+                drop(udp);
+                let tls = remote_tls::server_config(&server_identity, roots).unwrap();
+                let (socket, _) = listener.accept().await.unwrap();
+                let connection = remote_tls::accept(socket, &tls).await.unwrap();
+                let channel = connection.channel;
+                assert!(matches!(
+                    Receive::default().next(&channel).await.unwrap().frame,
+                    Frame::Hello { .. }
+                ));
+                Transmit::default().send(&channel, 0, &close).await.unwrap();
+                std::future::pending::<()>().await;
+            }
+        };
+        let result = tokio::time::timeout(Duration::from_secs(8), async {
+            tokio::select! {
+                result = run(&identity, Some(state.0.clone())) => result,
+                () = server => panic!("fixture stopped before the infraternal agent returned"),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the retirement must end the service loop, quic={quic}"));
+        assert!(is_retired(&result.unwrap_err()));
+    }
+}
+
 /// A rootless identity bound to another uid is refused before any dial.
 #[tokio::test]
 async fn rootless_uid_mismatch_is_refused_before_dial() {

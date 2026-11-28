@@ -94,7 +94,7 @@ test("a throttled machine review retries without starting approval", async ({ pa
     else await route.fallback();
   });
   await page.goto(LINK);
-  await expect(page.getByRole("timer")).toHaveText("Retrying in 3s.");
+  await expect(page.getByRole("timer")).toHaveText("Trying again in 3 seconds.");
   expect(inspections).toBe(1);
   await page.clock.fastForward(3000);
   await page.clock.resume();

@@ -87,7 +87,7 @@ export const SETTINGS_MAP: readonly ComponentDef[] = [
     { id: "passkeys", title: "Passkeys", docs: { page: "reference/keys", heading: "passkey" }, panel: "account", only: ["Passkeys"] },
     { id: "recovery", title: "Recovery", docs: { page: "reference/keys", heading: "recovery-words" }, panel: "account", only: ["Recovery key"] },
     { id: "apps", title: "Apps", docs: { page: "reference/keys", heading: "keys-last" }, settings: ["app-key"] },
-    { id: "devices", title: "Devices", docs: { page: "reference/keys", heading: "browsers-stay-signed-in-for" }, panel: "devices", settings: ["browser-session"] },
+    { id: "devices", title: "Devices", docs: { page: "reference/keys", heading: "browser-session-length" }, panel: "devices", settings: ["browser-session"] },
   ] },
   { id: "machines", title: "Machines", icon: "machines", admin: true, groups: [
     { id: "new-machines", title: "New Machines", docs: { page: "reference/keys", heading: "add-link-lasts" }, settings: ["add-link", "join-code", "install-mode", "sign-in-account", "join-mesh"] },

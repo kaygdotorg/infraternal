@@ -53,7 +53,7 @@ export class AccessReportError extends Error {
 export function serverAccessReports(): AccessReportService {
   const post = async <T>(path: string, body: unknown): Promise<T> => {
     const response = await fetch(`/remote/hosts/${path}`, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    if (!response.ok) throw new AccessReportError("The access report could not be read.", response.status);
+    if (!response.ok) throw new AccessReportError("Couldn't load the access report.", response.status);
     return await response.json() as T;
   };
   return {
@@ -126,7 +126,7 @@ export function createAccessReportInbox(core: CoreScreen, service: AccessReportS
     // Gone at once; a failed call brings it back on the next ask, so a dismissal never looks done when it is not.
     entries = entries.filter((other) => keyOf(other) !== keyOf(entry));
     publish();
-    void service.dismiss(entry.host_id, entry.person_id).catch(() => { core.toast.show({ message: "The report could not be dismissed. Try again.", tone: "error", duration: 6000 }); void refresh(); });
+    void service.dismiss(entry.host_id, entry.person_id).catch(() => { core.toast.show({ message: "Couldn't dismiss this report. Check your connection and try again.", tone: "error", duration: 6000 }); void refresh(); });
   };
   const refresh = (): Promise<void> => running ??= (async () => {
     window.clearTimeout(first);

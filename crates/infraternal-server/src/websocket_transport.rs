@@ -500,9 +500,9 @@ fn visibility_notice(json: &[u8]) -> Option<bool> {
         .then(|| notice.get("hidden")?.as_bool())?
 }
 
-/// The per-terminal sibling of [`visibility_notice`]: a terminal's viewer is hidden (page hidden or its window
-/// off the canvas) or shown again. Sent on the terminal's own stream; the socket loop parks or resumes that
-/// terminal's route probes [#562]. Same size bound and strict shape; anything else is `None`.
+/// Accept a terminal visibility notice's strict shape for compatibility. The server's liveness lease
+/// is shared by the host link, so this notice never parks or resumes a terminal-specific probe [#562].
+/// Same size bound as [`visibility_notice`]; anything else is `None`.
 pub(crate) fn terminal_visibility_notice(json: &[u8]) -> Option<bool> {
     if json.len() > 128 {
         return None;

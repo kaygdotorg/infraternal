@@ -28,10 +28,10 @@ test("a throttled layout startup counts down and retries", async ({ page }, info
   await expect(page.getByRole("heading", { name: "Connect to load your layout" })).toBeVisible();
   await expect(page.getByText("Your layout will load when the connection is ready.")).toBeVisible();
   const countdown = page.getByRole("timer");
-  await expect(countdown).toHaveText("Retrying in 3s.");
+  await expect(countdown).toHaveText("Trying again in 3 seconds.");
   await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
   await page.clock.fastForward(1000);
-  await expect(countdown).toHaveText("Retrying in 2s.");
+  await expect(countdown).toHaveText("Trying again in 2 seconds.");
   const left = await page.locator("#unavailable-title, #status-error")
     .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().left));
   expect(left).toHaveLength(2);

@@ -16,10 +16,12 @@
 //! - When `--json` is active on a terminal, the explanation is printed to stderr as plain
 //!   text (no ANSI escape sequences) so stdout remains valid JSON while the person still
 //!   sees why `sudo` is asking for a password.
-//! - Colour is enabled only on a colour-capable terminal (`TERM != "dumb"` and `NO_COLOR`
-//!   unset or empty) outside `--json`.
+//! - UTF-8 terminals use the shared panel. Colour respects `NO_COLOR`, and `--json`
+//!   and terminals without Unicode use plain text.
 
 use std::io::{self, IsTerminal, Write};
+
+use crate::present;
 
 /// Bold ANSI SGR prefix for section headings.
 const ANSI_BOLD: &str = "\u{1b}[1m";
@@ -284,6 +286,28 @@ impl ElevationPrompt {
         Ok(true)
     }
 
+    /// Lay out the existing copy with the shared bullets and frame.
+    #[must_use]
+    pub fn render_panel(self, width: usize, unicode: bool) -> String {
+        use std::fmt::Write as _;
+
+        let room = width.saturating_sub(if unicode { 4 } else { 0 });
+        let mut body = String::new();
+        for line in self.render(false).lines() {
+            if let Some(item) = line.strip_prefix("→ ") {
+                body.push_str(&present::bullets(&[item.to_owned()], 0, room, unicode));
+            } else {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                for line in present::wrap(line, room) {
+                    let _ = writeln!(body, "{line}");
+                }
+            }
+        }
+        present::panel(&body, 0, width, unicode)
+    }
+
     /// Print this prompt to stderr before invoking `sudo`, respecting TTY, `TERM`,
     /// `NO_COLOR`, and `--json`.
     ///
@@ -291,8 +315,23 @@ impl ElevationPrompt {
     /// will report any terminal failure of its own.
     pub fn print_to_stderr(self, json_output: bool) {
         let options = PromptOptions::detect(json_output);
+        if !options.terminal {
+            return;
+        }
+        let width = std::env::var("COLUMNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(80)
+            .clamp(20, 100);
+        let unicode = !json_output && present::supports_unicode(true);
+        let prompt = self.render_panel(width, unicode);
         let mut stderr = io::stderr().lock();
-        let _ = self.write_to(&mut stderr, options);
+        let _ = if options.color && unicode {
+            write!(stderr, "{ANSI_CYAN}{prompt}{ANSI_RESET}")
+        } else {
+            stderr.write_all(prompt.as_bytes())
+        };
+        let _ = stderr.flush();
     }
 }
 
@@ -479,6 +518,24 @@ mod tests {
         assert!(
             styled.ends_with("If you don't, you won't be able to join this Mac to your mesh.\n")
         );
+    }
+
+    /// The same three sections fit narrow terminals with or without Unicode.
+    #[test]
+    fn panels_preserve_the_copy_and_fit_the_terminal() {
+        for prompt in ALL_PROMPTS {
+            let plain = prompt.render_panel(48, false);
+            let framed = prompt.render_panel(48, true);
+            assert!(plain.is_ascii());
+            assert!(plain.contains("- "));
+            assert!(framed.starts_with('┌'));
+            assert!(framed.contains("• "));
+            for output in [plain, framed] {
+                assert!(output.lines().all(|line| line.chars().count() <= 48));
+                assert!(output.contains("If you grant it, you get:"));
+                assert!(output.contains("If you don't, you won't be able to"));
+            }
+        }
     }
 
     /// Verify non-TTY runs suppress the interactive prompt completely.

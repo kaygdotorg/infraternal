@@ -74,7 +74,8 @@ export function countDownToRetry(label: HTMLElement, retryAt: number, retry: () 
       retry();
       return;
     }
-    label.textContent = `Retrying in ${Math.ceil(remaining / 1000)}s.`;
+    const seconds = Math.ceil(remaining / 1000);
+    label.textContent = seconds === 1 ? "Trying again in 1 second." : `Trying again in ${seconds} seconds.`;
     window.setTimeout(tick, remaining % 1000 || 1000);
   };
   tick();
@@ -183,7 +184,7 @@ export async function inspectDeviceApproval(code: string, expected: ApprovalRevi
       && FINGERPRINT.test(review.key_fingerprint)) {
       return { kind: "join_machine", hostname: review.hostname, mode: review.mode, keyFingerprint: review.key_fingerprint };
     }
-    throw new AuthError("The server's request to add this machine could not be reviewed. Check that the server is up to date, then run infraternal up again.");
+    throw new AuthError("Couldn't review the request to add this machine. Check that the server is up to date, then run infraternal up again.");
   }
   const scopes = review?.scopes;
   if ((review?.kind !== undefined && review.kind !== "sign_in")
@@ -197,7 +198,7 @@ export async function inspectDeviceApproval(code: string, expected: ApprovalRevi
     || !Number.isInteger(review.lifetime_seconds)
     || review.lifetime_seconds < MIN_KEY_LIFETIME_SECONDS
     || review.lifetime_seconds > MAX_KEY_LIFETIME_SECONDS) {
-    throw new AuthError("The server's sign-in request could not be reviewed. Check that the server is up to date, then ask for a new link.");
+    throw new AuthError("Couldn't review the sign-in request. Check that the server is up to date, then ask for a new link.");
   }
   return { kind: "sign_in", device: review.device as string, scopes: [...scopes] as string[], lifetimeSeconds: review.lifetime_seconds };
 }
@@ -249,10 +250,10 @@ function deviceApprovalError(error: unknown, kind: ApprovalReview["kind"]): unkn
 /** Reads the public first-run state before choosing an access screen. */
 export async function checkStatus(): Promise<AuthStatus> {
   const status = await post<{ setup_required: unknown; setup_token_command?: unknown }>("status", {});
-  if (typeof status.setup_required !== "boolean") throw new AuthError("The server's answer could not be used. Try again.");
+  if (typeof status.setup_required !== "boolean") throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   const setupTokenCommand = status.setup_token_command ?? "infraternal server setup-token";
   if (setupTokenCommand !== "infraternal server setup-token" && setupTokenCommand !== "sudo infraternal server setup-token") {
-    throw new AuthError("The server's setup command could not be used. Try again.");
+    throw new AuthError("Received an invalid setup command from the server. Reload the page or update the server.");
   }
   return { setupRequired: status.setup_required, setupTokenCommand };
 }
@@ -307,11 +308,12 @@ export interface AccountSummary {
   recovery_set_up: boolean;
 }
 
+/** Reads the signed-in account's passkey count and recovery setup state from the server. */
 export async function readAccountSummary(): Promise<AccountSummary> {
   const summary = await post<AccountSummary>("account-summary", {});
   if (typeof summary.user_id !== "string" || typeof summary.session_incarnation !== "string"
     || !Number.isSafeInteger(summary.passkeys) || summary.passkeys < 0 || typeof summary.recovery_set_up !== "boolean") {
-    throw new AuthError("Your account summary could not be read. Try again.");
+    throw new AuthError("Couldn't load your account summary. Reload the page and try again.");
   }
   return summary;
 }
@@ -428,6 +430,7 @@ export async function addSecondPasskey(userId: string): Promise<void> {
   }, { kind: "passkey.add" });
 }
 
+/** Runs passkey sign-in and unwraps the account data-encryption key for the browser session or a bound action. */
 async function unlockWithPasskey(
   device: string,
   expectedUser?: string,
@@ -475,7 +478,7 @@ async function unlockWithPasskey(
         }
       } finally { first.fill(0); }
       unlockedKey = await unwrapDek(prf, envelope, userId, "passkey");
-      if (unlockedKey.byteLength !== 32) throw new AuthError("Your account key could not be unlocked. Try again.");
+      if (unlockedKey.byteLength !== 32) throw new AuthError("Couldn't unlock your account key. Try your passkey again.");
       if (!useKey) { unlockedKey.fill(0); unlockedKey = undefined; }
       await post("unlock-finish", { pending_transaction: transaction });
     } catch (error: unknown) {
@@ -526,16 +529,16 @@ async function post<Result = unknown>(action: string, body: unknown, headers: Re
       body: JSON.stringify(body),
     }));
   } catch {
-    throw new AuthError("The infraternal server could not be reached.");
+    throw new AuthError("Couldn't reach the infraternal server. Check your connection and try again.");
   }
   if (!response.ok) {
-    const message = response.status >= 500 ? "The server could not complete the request. Try again."
+    const message = response.status >= 500 ? "Server error while completing sign-in. Wait a moment and try again."
       : response.status === 429 ? "Too many attempts. Wait a minute and try again."
       : action === "setup-check" && response.status === 401 ? "That token doesn't match. Run the command shown on the setup screen."
       : action === "setup-start" && response.status === 401 ? "The setup token is invalid or expired. Get the current token from the server."
       : action === "setup-start" && response.status === 409 ? "That username is already in use. Choose another username."
-      : action === "login-finish" ? "This passkey could not sign in. Try your registered passkey."
-      : "The request could not be accepted. Check your details and try again.";
+      : action === "login-finish" ? "This passkey didn't match your account. Try your registered passkey."
+      : "Couldn't complete sign-in. Check your passkey or reload the page.";
     throw new AuthError(message, response.status,
       response.status === 429 ? authRetryAt(response.headers.get("Retry-After")) : undefined);
   }
@@ -543,7 +546,7 @@ async function post<Result = unknown>(action: string, body: unknown, headers: Re
   try {
     return (await response.json()) as Result;
   } catch {
-    throw new AuthError("The server sent a response this browser could not use. Try again.");
+    throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   }
 }
 
@@ -780,10 +783,10 @@ function copyBytes(input: unknown, field: string): Uint8Array {
     }
   } catch {
     binaryDiagnostic(input, field);
-    throw new AuthError("This browser returned passkey data that could not be read. Try another browser.");
+    throw new AuthError("Couldn't read passkey data from this browser. Try another browser.");
   }
   binaryDiagnostic(input, field);
-  throw new AuthError("This browser returned passkey data that could not be read. Try another browser.");
+  throw new AuthError("Couldn't read passkey data from this browser. Try another browser.");
 }
 
 /** Log only fixed shape codes and sizes; never values, credential IDs or arbitrary object tags. */
@@ -813,17 +816,19 @@ function base64url(bytes: Uint8Array): string {
   return btoa(binary).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
+/** Decodes an unpadded base64url string into bytes, rejecting malformed or non-canonical encodings. */
 function decodeBase64url(value: string): Uint8Array {
-  if (!/^[A-Za-z0-9_-]*$/.test(value) || value.length % 4 === 1) throw new AuthError("The server's answer could not be used. Try again.");
+  if (!/^[A-Za-z0-9_-]*$/.test(value) || value.length % 4 === 1) throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  if (base64url(bytes) !== value) throw new AuthError("The server's answer could not be used. Try again.");
+  if (base64url(bytes) !== value) throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   return bytes;
 }
 
+/** Validates that a JSON value from the server is a non-null plain object. */
 function record(value: unknown, name: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new AuthError("The server's answer could not be used. Try again.");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   return value as Record<string, unknown>;
 }
 
@@ -832,10 +837,11 @@ function requiredString(value: unknown, name: string): string {
   return value;
 }
 
+/** Validates that a JSON field is a lowercase canonical UUID string. */
 function canonicalUuid(value: unknown, name: string): string {
   const result = requiredString(value, name);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(result)) {
-    throw new AuthError("The server's answer could not be used. Try again.");
+    throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   }
   return result;
 }

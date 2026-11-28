@@ -50,20 +50,11 @@ async fn authorize_host(
 fn host_key(host: Option<uuid::Uuid>) -> Vec<u8> {
     host.map_or_else(Vec::new, |host| host.as_bytes().to_vec())
 }
-/// The preference in force for `person` on `host` (or with no host).
+/// Resolve the account selection for login preparation and terminal opens.
 ///
-/// `global_account` keeps its meaning (the explicit global choice, else the
-/// infraternal username). The account a login uses on a host is, in order:
-/// 1. the person's explicit choice for that host;
-/// 2. on a rootless host, the SSH account it was added with: its infraternal
-///    agent runs as that account and can open no other, so any other default
-///    fails the host's login check on every add (#305 F-A);
-/// 3. the explicit global choice;
-/// 4. the infraternal username.
-///
-/// A rootful host keeps the infraternal username as its default even when it was
-/// added as `root@…`: its infraternal agent can open any account, and the owner
-/// does not want to land in root by default (D336).
+/// A remote user-mode host resolves its enrolled execution UID in its own
+/// account database. System-mode and embedded hosts keep the per-host choice,
+/// then the global choice, then the person's infraternal username.
 async fn read(
     tx: &mut Transaction<'_, Sqlite>,
     person: &str,
@@ -79,38 +70,31 @@ async fn read(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|_| REFUSED)?;
-    let added: Option<(String, Option<String>)> = match host {
-        Some(host) => sqlx::query_as("SELECT h.mode, b.address FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=? AND h.owner_id=?")
-            .bind(host.as_bytes().as_slice()).bind(person).fetch_optional(&mut **tx).await.map_err(|_| REFUSED)?,
-        None => None,
+    let rootless = match host {
+        Some(host) => sqlx::query_scalar::<_, bool>(
+            "SELECT mode='rootless' FROM remote_hosts WHERE id=? AND owner_id=?",
+        )
+        .bind(host.as_bytes().as_slice())
+        .bind(person)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|_| REFUSED)?,
+        None => false,
     };
-    let rootless = added.as_ref().is_some_and(|(mode, _)| mode == "rootless");
-    let added_as = added
-        .and_then(|(_, address)| address)
-        .as_deref()
-        .and_then(added_account);
-    let global_account = explicit_global.clone().unwrap_or(username.clone());
-    let account = host_account
-        .clone()
-        .or_else(|| added_as.filter(|_| rootless))
-        .or(explicit_global)
-        .unwrap_or(username);
+    let global_account = explicit_global.unwrap_or(username);
+    let account = (!rootless).then(|| {
+        host_account
+            .clone()
+            .unwrap_or_else(|| global_account.clone())
+    });
     Ok(Preference {
         account,
         global_account,
         host_account,
     })
 }
-/// The SSH account in an add-host address (`user@host[:port]`), if it names one.
-/// Add-host validated the address when it was stored; anything else yields none.
-fn added_account(address: &str) -> Option<String> {
-    address
-        .split_once('@')
-        .map(|(user, _)| user)
-        .filter(|user| !user.is_empty())
-        .map(str::to_owned)
-}
-/// Resolve a preferred account for a real terminal open using the same durable state and authority.
+/// Resolve the login selection using the same durable state and authority as preferences.
+/// `None` selects the user-mode host's enrolled execution UID.
 /// # Errors
 /// Refuses expired sessions, foreign/revoked hosts and unavailable storage.
 pub async fn resolve(
@@ -118,7 +102,7 @@ pub async fn resolve(
     person: &str,
     hash: &str,
     host: Option<uuid::Uuid>,
-) -> Result<String, &'static str> {
+) -> Result<Option<String>, &'static str> {
     AccountsPlugin::new(pool.clone())
         .get(person, hash, Selection { host_id: host })
         .await
@@ -133,7 +117,7 @@ pub(crate) async fn resolve_for_key(
     pool: &SqlitePool,
     person: &str,
     host: uuid::Uuid,
-) -> Result<String, &'static str> {
+) -> Result<Option<String>, &'static str> {
     let mut tx = pool.begin().await.map_err(|_| REFUSED)?;
     authorize_host(&mut tx, person, Some(host)).await?;
     let preference = read(&mut tx, person, Some(host)).await?;

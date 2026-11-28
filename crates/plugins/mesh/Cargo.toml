@@ -22,7 +22,6 @@ agent = [
     "dep:ring",
     "dep:tracing",
     "dep:infraternal-linux-tun",
-    "tokio/rt-multi-thread",
 ]
 # Relayed pairs through the seam C shim and relay address observation [313].
 relay = ["agent", "dep:socket2", "dep:infraternal-plugin-relay", "infraternal-plugin-relay/runtime", "infraternal-mesh/relay", "infraternal-mesh-node/relay"]
@@ -44,7 +43,6 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 sqlx.workspace = true
-tokio.workspace = true
 tracing = { workspace = true, optional = true }
 
 nix = { workspace = true, optional = true, features = ["net", "ioctl", "poll", "time", "uio"] }
@@ -57,8 +55,16 @@ uuid = { workspace = true, optional = true }
 hickory-proto = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 
-# Both node platforms use the same pinned source to keep Nix vendoring unambiguous (D352).
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# The Linux device worker uses the multi-thread runtime. Apple nodes use a
+# current-thread runtime so the extension can share the engine.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tokio.workspace = true
+
+# Unix node builds use the same pinned engine source (D352).
+[target.'cfg(unix)'.dependencies]
 # ring remains the one crypto backend (D289).
 # The pinned fork commit (#260) runs receive batches inline on macOS by default
 # (GOTATUN_BENCH_RX_INLINE_MAX=0 turns that off; Linux keeps it off). Connected
@@ -118,6 +124,8 @@ url = { workspace = true, optional = true }
 # `Arc::new_cyclic` and `packet_lookup.insert_peer` keeps dynamically added peers from
 # being dropped from `timer_queue` permanently (#605, J1299).
 gotatun = { workspace = true, optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
