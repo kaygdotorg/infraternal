@@ -315,30 +315,37 @@ pub(super) fn inspect(root: &Path, owner: u32) -> io::Result<Snapshot> {
     };
     checked(&file, &path, owner)?;
     file.try_lock_shared().map_err(lock_error)?;
-    checked(&file, &path, owner)?;
-    snapshot(&mut file, root)
+    let state = checked(&file, &path, owner).and_then(|()| snapshot(&mut file, root));
+    file.unlock()?;
+    state
+}
+
+impl Drop for Journal {
+    /// Release the lock when the transaction ends, even if a concurrent fork
+    /// briefly inherited the still-open descriptor before exec closes it.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 impl Journal {
     /// Reopen and lock a committed journal without creating a placeholder on retry.
     pub(super) fn open_removal(root: &Path, owner: u32) -> io::Result<(Self, Snapshot)> {
         let path = root.join(NAME);
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .append(true)
             .custom_flags(nix::libc::O_NOFOLLOW)
             .open(&path)?;
         checked(&file, &path, owner)?;
         file.try_lock().map_err(lock_error)?;
-        checked(&file, &path, owner)?;
-        let state = snapshot(&mut file, root)?;
-        Ok((
-            Self {
-                file,
-                root: root.to_owned(),
-            },
-            state,
-        ))
+        let mut journal = Self {
+            file,
+            root: root.to_owned(),
+        };
+        checked(&journal.file, &path, owner)?;
+        let state = snapshot(&mut journal.file, root)?;
+        Ok((journal, state))
     }
 
     /// Save the host before any deletion can remove its enrollment identity.
@@ -368,7 +375,7 @@ impl Journal {
     /// Acquire the stable private journal after read-only preflight has accepted this host.
     pub(super) fn open(root: &Path, owner: u32) -> io::Result<(Self, Snapshot)> {
         let path = root.join(NAME);
-        let mut file = match OpenOptions::new()
+        let file = match OpenOptions::new()
             .read(true)
             .append(true)
             .create_new(true)
@@ -391,16 +398,14 @@ impl Journal {
         };
         checked(&file, &path, owner)?;
         file.try_lock().map_err(lock_error)?;
-        checked(&file, &path, owner)?;
+        let mut journal = Self {
+            file,
+            root: root.to_owned(),
+        };
+        checked(&journal.file, &path, owner)?;
         File::open(root)?.sync_all()?;
-        let state = snapshot(&mut file, root)?;
-        Ok((
-            Self {
-                file,
-                root: root.to_owned(),
-            },
-            state,
-        ))
+        let state = snapshot(&mut journal.file, root)?;
+        Ok((journal, state))
     }
 
     /// Append and sync before the caller performs the operation authorized by this record.
@@ -506,5 +511,29 @@ impl Journal {
     /// Transfer ownership only after the service has passed its active check.
     pub(super) fn commit(&mut self) -> io::Result<()> {
         self.append(&Record::Committed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Check lock lifetime when another descriptor shares a transaction's open file.
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    /// A temporary inherited descriptor cannot keep a completed transaction locked.
+    #[test]
+    fn journal_releases_lock_before_the_last_descriptor_closes() {
+        let root = std::env::temp_dir().join(format!("jl-{}", uuid::Uuid::new_v4().simple()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let owner = nix::unistd::geteuid().as_raw();
+        let (journal, _) = Journal::open(&root, owner).unwrap();
+        let inherited = journal.file.try_clone().unwrap();
+        drop(journal);
+        let (next, _) = Journal::open_removal(&root, owner).unwrap();
+        drop(next);
+        assert!(inherited.metadata().unwrap().is_file());
+        drop(inherited);
+        fs::remove_dir_all(root).unwrap();
     }
 }
