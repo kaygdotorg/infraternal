@@ -1265,7 +1265,7 @@ fn delete_retired_user(retired: &Path, directory: &Path) -> io::Result<Vec<Strin
 
 #[cfg(test)]
 mod uninstall_tests {
-    //! Validate the same private receipt and LaunchAgent arguments used for removal.
+    //! Validate the same private receipt and `LaunchAgent` arguments used for removal.
     #![allow(clippy::unwrap_used)]
     use super::*;
 
@@ -1320,8 +1320,8 @@ mod uninstall_tests {
         );
         write_new(&paths.launch_agent, plist.as_bytes(), 0o644).unwrap();
         assert_eq!(
-            checked_uninstall_paths(&paths, uid).unwrap(),
-            [paths.launch_agent.clone()]
+            checked_uninstall_paths(&paths, uid).unwrap().as_slice(),
+            std::slice::from_ref(&paths.launch_agent)
         );
         fs::remove_file(&paths.launch_agent).unwrap();
         assert_eq!(
