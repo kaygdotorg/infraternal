@@ -823,7 +823,7 @@ fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
         runtime.join("infraternal")
     };
     private_dir(&state)?;
-    let sessions = crate::runtime_dir::create_session_dir(&state)?;
+    let (sessions, _) = crate::runtime_dir::create_session_dir(&state)?;
     let mut id = String::with_capacity(32);
     for byte in config.session {
         let _ = write!(id, "{byte:02x}");

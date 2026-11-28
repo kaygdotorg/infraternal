@@ -740,17 +740,14 @@ impl Install {
         ] {
             self.directory(&path, mode)?;
         }
-        // Record the cache directories before launch so an aborted up can
-        // remove the ones it created without touching an existing runtime.
-        if let Some(dir) =
-            infraternal_shim::runtime_dir::managed_macos_session_dir(&self.paths.state)
-        {
-            let product = dir.parent().ok_or(ErrorKind::InvalidInput)?;
-            let caches = product.parent().ok_or(ErrorKind::InvalidInput)?;
-            for path in [caches, product, dir.as_path()] {
-                self.directory(path, 0o700)?;
+        // Rollback owns a newly created socket directory. Its shared cache
+        // parents can also serve a manually started infraternal agent.
+        if infraternal_shim::runtime_dir::managed_macos_session_dir(&self.paths.state).is_some() {
+            let (dir, created) =
+                infraternal_shim::runtime_dir::create_session_dir(&self.paths.state)?;
+            if created {
+                self.created.push(dir);
             }
-            infraternal_shim::runtime_dir::create_session_dir(&self.paths.state)?;
         }
         Ok(())
     }

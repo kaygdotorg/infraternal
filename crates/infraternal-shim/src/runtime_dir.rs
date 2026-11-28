@@ -74,31 +74,33 @@ pub fn managed_macos_session_dir(state: &Path) -> Option<PathBuf> {
 
 /// Create and validate the shared session directory inside the caller's own
 /// private runtime. The Mac cache hierarchy must be private at every level.
+/// The boolean says whether this call created the session directory itself.
 /// # Errors
 /// Refuses unsafe directory ownership, links and filesystem errors.
-pub fn create_session_dir(state: &Path) -> io::Result<PathBuf> {
+pub fn create_session_dir(state: &Path) -> io::Result<(PathBuf, bool)> {
     #[cfg(target_os = "macos")]
     if let Some(dir) = managed_macos_session_dir(state) {
         let root = dir.parent().ok_or(io::ErrorKind::InvalidInput)?;
         let caches = root.parent().ok_or(io::ErrorKind::InvalidInput)?;
         check_private(caches)?;
         create_private(root)?;
-        create_private(&dir)?;
-        return Ok(dir);
+        let created = create_private(&dir)?;
+        return Ok((dir, created));
     }
     let dir = state.join("sessions");
-    create_private(&dir)?;
-    Ok(dir)
+    let created = create_private(&dir)?;
+    Ok((dir, created))
 }
 
 /// Create one 0700 directory or validate the one that already exists.
-fn create_private(path: &Path) -> io::Result<()> {
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+fn create_private(path: &Path) -> io::Result<bool> {
+    let created = match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
         Err(error) => return Err(error),
-    }
-    check_private(path)
+    };
+    check_private(path)?;
+    Ok(created)
 }
 
 /// Remove only the managed Mac socket cache, after uninstall has stopped its
