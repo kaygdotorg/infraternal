@@ -2211,6 +2211,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

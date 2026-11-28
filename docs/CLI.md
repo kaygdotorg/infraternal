@@ -9,14 +9,12 @@ safety notes.
 
 ## Human and JSON output
 
-Every command prints the same shape for people: the answer in one plain
-sentence first, then short aligned blocks, then `Why` (failures only) and
-`Next` (only a follow-up that is true for this state, at most three). Tables
-show a header only from two rows, size each column to its widest value, and
-wrap only the last column. Width comes from the terminal, then `$COLUMNS`,
-then 80, and never exceeds 100. Colour and the state mark (`●` `○` `!` `✕`)
-appear only on a terminal; colour is off with `NO_COLOR`. Failures go to
-standard error.
+Commands lead with the answer and show details in short aligned blocks.
+Follow-up actions appear as bullets. UTF-8 terminals can draw table borders
+and frame related details. Redirected output uses plain separators.
+Colour is off when `NO_COLOR` is set to a nonempty value. Width comes from
+the terminal, then `$COLUMNS`, then 80, with a maximum of 100 columns. Long
+URLs and other unbroken values stay copyable. Failures go to standard error.
 
 Every command, including hidden internal ones, accepts `--json`. JSON is one
 compact line per result on standard output, also for failures and usage
@@ -210,8 +208,8 @@ default. Run it as the person who uses the Mac, without `sudo`:
 - The infraternal agent runs as you, from
   `~/Library/LaunchAgents/kayg.infraternal.agent.plist`, with its files in
   `~/Library/Application Support/infraternal` and its log in
-  `~/Library/Logs/infraternal/agent.log` (D395). `up` prints the `PATH` line
-  to add.
+  `~/Library/Logs/infraternal/agent.log` (D395). `up` shows the full path to
+  the installed command and offers to add it to `PATH` for new zsh sessions.
 - Only one account per Mac can use user mode, and not beside root mode.
 - A Mac that joined with an older build has the same pieces under `org.infraternal.*`
   names. Run `infraternal up` again: it asks for the administrator password once,
