@@ -1212,14 +1212,17 @@ fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Resul
     }
     for plist in [&paths.launch_agent, &paths.legacy_launch_agent] {
         match fs::remove_file(plist) {
-            Ok(()) => {}
+            Ok(()) => fs::File::open(plist.parent().ok_or(ErrorKind::InvalidInput)?)?.sync_all()?,
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
     }
     let mut left = Vec::new();
     match checked_logs(&paths.logs, uid) {
-        Ok(true) => fs::remove_dir_all(&paths.logs)?,
+        Ok(true) => {
+            fs::remove_dir_all(&paths.logs)?;
+            fs::File::open(paths.logs.parent().ok_or(ErrorKind::InvalidInput)?)?.sync_all()?;
+        }
         Ok(false) => {}
         Err(error) if error.kind() == ErrorKind::PermissionDenied => {
             left.push(format!(

@@ -938,7 +938,10 @@ async fn cleanup_locked(
 fn unlink_if_present(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        result => result,
+        Err(error) => Err(error),
+        Ok(()) => {
+            std::fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()
+        }
     }
 }
 
@@ -1127,6 +1130,7 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
             _ => {}
         }
     }
+    std::fs::File::open(base)?.sync_all()?;
     for file in [
         ".bootstrap-ready",
         ".bootstrap-transaction",
@@ -1134,13 +1138,13 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
         STAGED,
         ".bootstrap-owner",
     ] {
-        match std::fs::remove_file(base.join(file)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
+        unlink_if_present(&base.join(file))?;
     }
     match std::fs::remove_dir(base) {
-        Ok(()) => Ok(Vec::new()),
+        Ok(()) => {
+            std::fs::File::open(base.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()?;
+            Ok(Vec::new())
+        }
         Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(vec![format!(
             "Left {} because it holds files infraternal setup didn't create.",
             base.display()

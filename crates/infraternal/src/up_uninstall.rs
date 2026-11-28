@@ -296,11 +296,13 @@ fn remove_entry(
                 "Left {} because it contains other files.",
                 entry.path.display()
             ));
+            return Ok(());
         }
     } else {
         fs::remove_file(&entry.path)?;
     }
-    Ok(())
+    // The journal is the last durable deletion, even when /var and /etc have separate filesystems.
+    fs::File::open(entry.path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()
 }
 
 /// Retire the owned agent rules and leave the loader if another role needs it.
@@ -312,6 +314,7 @@ fn clear_firewall(root: &Path, state: &Snapshot) -> io::Result<bool> {
         if journaled_policy(root, state, 0)?.is_some() {
             host_firewall::clear_installed_agent_rules_at(&paths, None)
                 .map_err(io::Error::other)?;
+            fs::File::open(root.join(BASE))?.sync_all()?;
         }
         Ok(existing(paths.server_policy_path())?.is_some()
             || existing(paths.agent_policy_path())?.is_some())
