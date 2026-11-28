@@ -886,7 +886,7 @@ mod tests {
         CURRENT, DATA_DIRECTORY, LABEL, LEGACY, MACHINE_BINARY, STATE_DIRECTORY, checked_launchctl,
         join_state_to_forget, render_plist, render_plist_for, trusted_binary_metadata,
     };
-    use std::path::Path;
+    use std::{os::unix::fs::DirBuilderExt, path::Path};
 
     /// A partially deleted renamed install remains discoverable after its receipt is gone.
     #[test]
