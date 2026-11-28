@@ -954,7 +954,14 @@ fn a_confirmed_roam_preserves_the_subnet_and_both_mesh_directions() {
         sender.send_to(b"authenticated roam", destination).unwrap();
     };
     move_peer(home);
-    let enter = wait_for_route(home, "j1156ab");
+    let enter_started = std::time::Instant::now();
+    wait_for_route(home, "j1156ab");
+    // The endpoint reaches the underlay as soon as the old /24 is deleted.
+    // Reading route status takes the reconcile lock and waits for the split
+    // prefixes to be written before we measure convergence and probe the LAN.
+    let state = a.network_route_state(lan());
+    assert_eq!(state["state"], "installed", "roam into subnet: {state}");
+    let enter = enter_started.elapsed();
     check_mesh(NS_A, NS_B, b_mesh);
     check_mesh(NS_B, NS_A, a_mesh);
     check_lan("after the roam into the subnet");
