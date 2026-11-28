@@ -141,7 +141,7 @@ class RootScriptTests(unittest.TestCase):
         self.assertIn('case $exe in "$work"/*)', nightly.ROOT_SCRIPT)
 
     def test_build_is_held_through_the_shared_slot_as_root(self):
-        self.assertIn("scripts/root-slot-hold --keep-fd 9 nix develop", nightly.ROOT_SCRIPT)
+        self.assertIn("scripts/root-slot-hold --reserved nightly --keep-fd 9 nix develop", nightly.ROOT_SCRIPT)
 
     def test_full_non_root_check_is_never_skipped_on_root(self):
         # The script may name the variable in comments; what must never happen is setting it.

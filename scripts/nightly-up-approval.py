@@ -20,7 +20,7 @@ Where each part runs, and why:
 - `ROOT_SCRIPT` runs as root on compute01. It trusts only the commit id and the public
   repository, as `scripts/tun-real-root-proof` does: root clones the commit into a fresh
   0700 folder under `/root`, builds it there with a root-owned cargo home, target and
-  Playwright browsers, through a shared build slot (`scripts/root-slot-hold`, so the claude
+  Playwright browsers, through the reserved nightly build slot (`scripts/root-slot-hold`, so the claude
   build account keeps its queue and nothing it writes reaches root's process). Then it runs
   `scripts/verify-up-approval-namespace` with the full check. The namespace script runs in
   its own process group (setsid); the trap kills only that group and removes root's folder,
@@ -114,7 +114,7 @@ export PLAYWRIGHT_BROWSERS_PATH=/root/.cache/up-approval-playwright
 export scratch=$work/tmp
 mkdir -p "$CARGO_HOME" "$PLAYWRIGHT_BROWSERS_PATH"
 cd "$work/src"
-python3 scripts/root-slot-hold --keep-fd 9 nix develop -c bash -c '
+python3 scripts/root-slot-hold --reserved nightly --keep-fd 9 nix develop -c bash -c '
     set -euo pipefail
     mkdir -m 700 -p "$scratch" && export TMPDIR=$scratch
     cd apps/tracer && bun install --frozen-lockfile && bun run build

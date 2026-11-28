@@ -13,7 +13,7 @@ is complete only when root runs it. The nightly runs it on compute01 every night
 |---|---|---|
 | Coordinator (`scripts/nightly-up-approval.py run`) | the operator's host, with `netbird ssh` | the infraternal orchestrator |
 | Root side (clone, build, proof, cleanup) | compute01, as root, over `netbird ssh root@` | the compute01 operator |
-| Build queue | compute01 build slot, through `scripts/root-slot-hold` | the claude build account |
+| Build queue | compute01 reserved nightly slot, through `scripts/root-slot-hold --reserved nightly` | the claude build account |
 
 ## What a run does
 
@@ -23,7 +23,7 @@ is complete only when root runs it. The nightly runs it on compute01 every night
    the non-root check would be skipped, and a pass would overstate the proof.
 3. As root, clones that commit from the public repository into a fresh 0700 folder
    under `/root`, builds it there (root-owned cargo home, target and Playwright browsers)
-   through the build slot, and runs `scripts/verify-up-approval-namespace` with the full
+   through the reserved nightly build slot, and runs `scripts/verify-up-approval-namespace` with the full
    check (`UP_E2E_SKIP_NONROOT` is never set).
 4. Records `log.txt` and `result.json` under `~/nightly-up-approval/<UTC time>-<sha12>/`
    on the operator's host (mode 0700). Exit 0 pass, 1 fail, 77 skip.
@@ -52,7 +52,10 @@ python3 -I scripts/nightly-up-approval.py run                        # the head 
 The fixture tests (`scripts/test-nightly-up-approval.py`) run in `scripts/verify fast`
 as the `nightly up-approval run` row and reach no host.
 
-## Not yet done
+## Schedule
 
-No timer is installed. Scheduling the nightly is a host change on the operator's
-host and is left to the orchestrator.
+The operator's systemd user timer on hd01 runs at 04:45 IST with up to ten
+minutes of jitter. Install the coordinator from a revision that supports
+`--reserved nightly` after the branch tested by the timer has the updated
+`root-slot-hold`. See [build slots](build-slots.md) for the compute01 reserve
+configuration.
