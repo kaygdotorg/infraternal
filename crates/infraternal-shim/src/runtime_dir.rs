@@ -114,7 +114,7 @@ fn create_private(path: &Path) -> io::Result<bool> {
 }
 
 /// Remove only the managed Mac socket cache, after uninstall has stopped its
-/// LaunchAgent and authenticated the installation receipt.
+/// `LaunchAgent` and authenticated the installation receipt.
 /// # Errors
 /// Refuses a nonprivate hierarchy or a filesystem failure.
 #[cfg(target_os = "macos")]
