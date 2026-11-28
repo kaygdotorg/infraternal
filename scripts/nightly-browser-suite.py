@@ -104,6 +104,7 @@ MAX_MERGED_REPORT_BYTES = 32 << 20
 MAX_JSONL_LINES = 200000
 MAX_PLANNED_TESTS = 50000
 MAX_UNRUN_FILES_IN_NOTE = 40
+DEADLINE_REASON = 'deadline-0745-ist'
 TIMEOUT_LABEL = re.compile(r'\A[0-9]{1,3}h\Z', re.ASCII)
 MAX_LOG_BYTES = 16 << 20
 MAX_META_BYTES = 64 << 10
@@ -863,7 +864,9 @@ def timeout_marker(run_name):
 
 def timeout_note(suite_timeout, finished, total):
     """The one sentence a timed-out night adds to the roll-up."""
-    return f'suite timed out after {suite_timeout[:-1]} h; {finished} of {"?" if total is None else total} tests ran'
+    reason = ('stopped at deadline (07:45 IST)' if suite_timeout == DEADLINE_REASON
+              else f'suite timed out after {suite_timeout[:-1]} h')
+    return f'{reason}; {finished} of {"?" if total is None else total} tests ran'
 
 
 def shard_note(shards):
@@ -972,7 +975,7 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS, suite_t
     if not isinstance(login, str) or not LOGIN.fullmatch(login):
         raise ValueError('no valid Forgejo login configured')
     post = functools.partial(post_as, login=login)
-    if suite_timeout is not None and not TIMEOUT_LABEL.fullmatch(suite_timeout):
+    if suite_timeout not in (None, DEADLINE_REASON) and not TIMEOUT_LABEL.fullmatch(suite_timeout):
         raise ValueError('bad suite timeout label')
     if not RUN_NAME.fullmatch(run_name):
         raise ValueError('bad run name')
@@ -1009,6 +1012,9 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS, suite_t
             raise ValueError('the timed-out run has no reportable shard plan')
     else:
         raise ValueError('the run left neither results.json nor results.jsonl')
+    if suite_timeout == DEADLINE_REASON:
+        merged['status'] = 'partial'
+        merged['stop_reason'] = 'stopped at deadline (07:45 IST)'
     merged_bytes = (json.dumps(merged, ensure_ascii=False, separators=(',', ':')) + '\n').encode()
     if len(merged_bytes) > MAX_MERGED_REPORT_BYTES:
         raise ValueError(f'merged report is larger than {MAX_MERGED_REPORT_BYTES} bytes')

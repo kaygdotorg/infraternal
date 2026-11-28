@@ -6,7 +6,8 @@ Installed root-owned at /usr/local/libexec/infraternal-browser-suite-service by
 fuzz helper it runs no repository code as root, and it keeps the Forgejo
 token away from the code under test:
 
-1. holds one shared build slot per Playwright shard (SHARDS, two) as `claude` (through `runuser`) until publication ends.
+1. holds one shared build slot per Playwright shard (SHARDS, two) as `claude` (through `runuser`) until the workload exits.
+   The scheduled service bounds checkout and suite execution at 07:45 IST, then reports after releasing the slots.
    Waiting for the slot has its own bound (QUEUE_WAIT_SECONDS): on a timeout
    the unit fails with exit 75 and one `QUEUE WAIT TIMEOUT` journal line, and no
    suite runs. The suite's own budget (`timeout`, 9 h) starts only after the
@@ -56,6 +57,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 from pathlib import Path
 
 BROWSER_USER = 'infraternal-browser'
@@ -73,6 +75,8 @@ QUEUE_WAIT_SECONDS = 12 * 3600
 # One build slot per Playwright shard, so the nightly is counted like the jobs it runs next to (equals `SHARDS` in nightly-browser-suite.py).
 SHARDS = 2
 SUITE_BUDGET = '9h'
+DEADLINE_REASON = 'deadline-0745-ist'
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 QUEUE_TIMEOUT_EXIT = 75
 SUITE_TIMEOUT_EXIT = 124
 # What the suite may leave in a run folder, and the most the helper will copy of each. `results.json` and
@@ -89,13 +93,33 @@ MERGED_REPORT_CAP = 32 << 20
 LOGIN_FILE = '/etc/infraternal-browser-suite.login'
 LOGIN_OWNER = 0
 LOGIN = re.compile(r'\A[A-Za-z0-9][A-Za-z0-9._-]{0,38}\Z', re.ASCII)
-# Stops every process of the suite account. Run as that account, so it can touch nobody else's. `kill` is not used:
-# procps' `kill -s KILL -- -1` prints its usage and signals nothing. A target of -1 means all processes of the
-# account except this one; no process left to signal (ESRCH) is success; anything else is an error.
-KILL_SNIPPET = ('import os, signal, sys\n'
-                'try:\n    os.kill(int(sys.argv[1]), signal.SIGKILL)\n'
-                'except ProcessLookupError:\n    pass\n')
-KILL_COMMAND = ['/usr/bin/python3', '-c', KILL_SNIPPET, '-1']
+# This dedicated uid runs only this suite. Descendants may create new process
+# groups, so sweep the uid's groups after the timed workload exits.
+KILL_SNIPPET = """import os, signal
+from pathlib import Path
+
+uid, own = os.getuid(), os.getpgrp()
+groups = set()
+for path in Path('/proc').iterdir():
+    if not path.name.isdecimal():
+        continue
+    try:
+        if any(line.split()[2] == str(uid) for line in (path / 'status').read_text().splitlines()
+               if line.startswith('Uid:')):
+            group = os.getpgid(int(path.name))
+            if group > 1 and group != own:
+                groups.add(group)
+    except ProcessLookupError:
+        pass
+    except FileNotFoundError:
+        pass
+for group in groups:
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+"""
+KILL_COMMAND = ['/usr/bin/python3', '-c', KILL_SNIPPET]
 RUN_NAME = re.compile(r'\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7}\Z', re.ASCII)
 PATH = 'PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin'
 
@@ -545,6 +569,56 @@ def stop_holder(holder):
         holder.terminate()
 
 
+def release_holders(holders):
+    """Release this service's holders before copying files or calling Forgejo."""
+    while holders:
+        holder = holders.pop()
+        try:
+            holder.stdin.write(b'x')
+            holder.stdin.close()
+        except BrokenPipeError:
+            pass
+        holder.wait()
+
+
+def night_deadline(started):
+    """Return 07:45 IST on the day of this activation, including late timer catch-ups."""
+    return started.astimezone(IST).replace(hour=7, minute=45, second=0, microsecond=0)
+
+
+def deadline_seconds(deadline):
+    """Round down the remaining wall time so a timed command stops at the window edge."""
+    return max(0, int((deadline - datetime.datetime.now(IST)).total_seconds()))
+
+
+def publish_deadline_summary(deadline, phase):
+    """Record the cutoff even when there is no usable browser manifest to stage."""
+    print(f'nightly browser suite: stopped at deadline 07:45 IST during {phase}', file=sys.stderr, flush=True)
+    root = Path(PUBLISH_HOME)
+    with tempfile.TemporaryDirectory(prefix='.deadline-', dir=root) as directory:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            data = json.dumps({'status': 'partial', 'reason': 'stopped at deadline', 'phase': phase,
+                               'deadline': deadline.isoformat()}) + '\n'
+            write_published_file(fd, 'last-deadline.json', data.encode())
+            os.replace(Path(directory) / 'last-deadline.json', root / 'last-deadline.json')
+            root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(root_fd)
+            finally:
+                os.close(root_fd)
+        finally:
+            os.close(fd)
+
+
+def timed_command(command, deadline):
+    """Cancel the whole timed command's group at the cutoff, including a case in flight."""
+    if deadline is None:
+        return command
+    seconds = deadline_seconds(deadline)
+    return ('timeout', '--signal=KILL', str(seconds), *command) if seconds else None
+
+
 def wait_for_slot(holder, seconds=None):
     """Wait up to `seconds` (default QUEUE_WAIT_SECONDS) for the holder to say it has a slot: True, False (it died) or None (still queued).
 
@@ -588,7 +662,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='Nightly browser suite service helper (D373, #443).')
     parser.add_argument('--report-only', action='store_true', help='only re-run the reporter on the files already staged')
     parser.add_argument('--run-name', default=None, help='with --report-only: the run folder name, for staging from an older helper')
+    parser.add_argument('--deadline-ist', action='store_true', help='bound the scheduled run to 07:45 IST')
     args = parser.parse_args(argv)
+    if args.deadline_ist and args.report_only:
+        parser.error('--deadline-ist applies only when running the suite')
     if args.run_name is not None and (not args.report_only or not RUN_NAME.fullmatch(args.run_name)):
         parser.error('--run-name needs --report-only and a run folder name like 20261109T134307Z-c442500')
     try:
@@ -617,19 +694,31 @@ def main(argv=None):
             return 1 if code == 0 else code
         return code
     started = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = night_deadline(started) if args.deadline_ist else None
     holders = []
     try:
         # One slot per shard, taken one after the other under a single queue budget. Slots already held are released
         # again if a later one never comes.
         deadline = time.monotonic() + QUEUE_WAIT_SECONDS
         for _ in range(SHARDS):
+            if cutoff is not None and not deadline_seconds(cutoff):
+                release_holders(holders)
+                publish_deadline_summary(cutoff, 'build-slot queue')
+                return SUITE_TIMEOUT_EXIT
             holder = subprocess.Popen(
                 ['runuser', '-u', 'claude', '--', BUILD_SLOT, '/usr/bin/python3', '-c',
                  f'import sys; sys.stdout.buffer.write({READY!r}); sys.stdout.flush(); sys.stdin.buffer.read(1)'],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
             holders.append(holder)
-            slot = wait_for_slot(holder, max(0.0, deadline - time.monotonic()))
+            queue_seconds = max(0.0, deadline - time.monotonic())
+            if cutoff is not None:
+                queue_seconds = min(queue_seconds, deadline_seconds(cutoff))
+            slot = wait_for_slot(holder, queue_seconds)
             if slot is None:
+                if cutoff is not None and deadline_seconds(cutoff) <= 1:
+                    release_holders(holders)
+                    publish_deadline_summary(cutoff, 'build-slot queue')
+                    return SUITE_TIMEOUT_EXIT
                 print(f'nightly browser suite: QUEUE WAIT TIMEOUT: no build slot after {QUEUE_WAIT_SECONDS // 3600} h in the queue '
                       f'({len(holders) - 1} of {SHARDS} slots held); no suite ran and nothing was reported', file=sys.stderr)
                 return QUEUE_TIMEOUT_EXIT
@@ -639,23 +728,42 @@ def main(argv=None):
         checkout = f'{BROWSER_HOME}/checkout'
         runs = f'{BROWSER_HOME}/runs'
         # The nightly follows the latest dev (D361/D373), so the checkout moves every night.
-        if as_user(BROWSER_USER, BROWSER_HOME, 'sh', '-c',
-                   'git -c core.hooksPath=/dev/null -c core.fsmonitor=false fetch --quiet origin dev '
-                   '&& git -c core.hooksPath=/dev/null -c core.fsmonitor=false checkout --quiet --detach origin/dev',
-                   cwd=checkout) != 0:
+        git = ('sh', '-c', 'git -c core.hooksPath=/dev/null -c core.fsmonitor=false fetch --quiet origin dev '
+               '&& git -c core.hooksPath=/dev/null -c core.fsmonitor=false checkout --quiet --detach origin/dev')
+        checkout_command = timed_command(git, cutoff)
+        status = as_user(BROWSER_USER, BROWSER_HOME, *checkout_command, cwd=checkout) if checkout_command else 0
+        if cutoff is not None and deadline_seconds(cutoff) <= 1 and (not checkout_command or status in (-9, 137)):
+            release_holders(holders)
+            publish_deadline_summary(cutoff, 'checkout')
+            return SUITE_TIMEOUT_EXIT
+        if status != 0:
             return 1
-        status = as_user(BROWSER_USER, BROWSER_HOME, 'nice', '-n', '10', 'timeout', '--kill-after=60', SUITE_BUDGET, 'nix', 'develop', '-c', 'python3',
-                         'scripts/nightly-browser-suite.py', 'run', '--runs-dir', runs, '--shards', str(SHARDS), cwd=checkout)
-        # Whatever the suite left running (browsers, servers) must not outlive its run or race the staging below.
-        # If this cannot be done, nothing is staged: the files could still be changing.
-        if as_user(BROWSER_USER, BROWSER_HOME, *KILL_COMMAND, cwd='/') != 0:
+        run = ('nix', 'develop', '-c', 'python3', 'scripts/nightly-browser-suite.py',
+               'run', '--runs-dir', runs, '--shards', str(SHARDS))
+        if cutoff is None:
+            command = ('timeout', '--kill-after=60', SUITE_BUDGET, *run)
+        else:
+            command = timed_command(run, cutoff)
+        if command is None:
+            release_holders(holders)
+            publish_deadline_summary(cutoff, 'suite startup')
+            return SUITE_TIMEOUT_EXIT
+        status = as_user(BROWSER_USER, BROWSER_HOME, 'nice', '-n', '10', *command, cwd=checkout)
+        stopped_at_deadline = cutoff is not None and status in (-9, 137) and deadline_seconds(cutoff) <= 1
+        # Stop this dedicated account's leftover browsers/servers before staging. No other builds use it.
+        cleanup_failed = as_user(BROWSER_USER, BROWSER_HOME, *KILL_COMMAND, cwd='/') != 0
+        release_holders(holders)
+        if stopped_at_deadline:
+            publish_deadline_summary(cutoff, 'browser suite')
+        if cleanup_failed:
             print('nightly browser suite: could not stop the suite account\'s leftover processes; nothing was staged or reported', file=sys.stderr)
             return 1
-        timed_out = status == 124
-        if timed_out:
+        timeout_reason = DEADLINE_REASON if stopped_at_deadline else SUITE_BUDGET if status == 124 else None
+        timed_out = timeout_reason is not None
+        if status == 124:
             print(f'nightly browser suite: SUITE TIMEOUT: the suite did not finish within {SUITE_BUDGET} of running '
                   '(the time in the build-slot queue is not counted); reporting the tests that finished', file=sys.stderr)
-        elif status != 0:
+        elif not timed_out and status != 0:
             return 1
         # The run account wrote everything below `runs`: treat it as data (see stage).
         owner = ids(BROWSER_USER)[0]
@@ -667,13 +775,13 @@ def main(argv=None):
             descriptor = fresh_staging(REPORT_HOME, reporter)
             try:
                 stage(runs, name, descriptor, owner, reporter)
-                write_staged_info(descriptor, name, SUITE_BUDGET if timed_out else None, reporter)
+                write_staged_info(descriptor, name, timeout_reason, reporter)
             finally:
                 os.close(descriptor)
         except (Refused, OSError) as error:
             print(f'nightly browser suite: refusing the run folder: {error}', file=sys.stderr)
             return SUITE_TIMEOUT_EXIT if timed_out else 1
-        code = report_step(login, name, SUITE_BUDGET if timed_out else None)
+        code = report_step(login, name, timeout_reason)
         try:
             publish_reported_run(name, owner, reporter[0])
         except (Refused, OSError) as error:
@@ -681,13 +789,7 @@ def main(argv=None):
             return SUITE_TIMEOUT_EXIT if timed_out else 1
         return SUITE_TIMEOUT_EXIT if timed_out else code
     finally:
-        for holder in holders:
-            try:
-                holder.stdin.write(b'x')
-                holder.stdin.close()
-            except BrokenPipeError:
-                pass
-            holder.wait()
+        release_holders(holders)
 
 
 if __name__ == '__main__':

@@ -27,7 +27,8 @@ the command root runs comes from root's own arguments.
 It replaces the host-only `/root/.cache/root-build-slot`, which passed root's
 stderr to claude's process. Run it from the reviewed clone root is building.
 
-Usage (as root): root-slot-hold [--keep-fd N]... <command> [args...]
+Usage (as root): root-slot-hold [--reserved nightly] [--keep-fd N]... <command> [args...]
+Only the nightly coordinator requests the reserved build slot.
 `--keep-fd N` passes this process's open descriptor N on to the command
 (the TUN proof passes its lock, so every root child of a run holds it).
 """
@@ -43,23 +44,24 @@ WAITER = ['/usr/bin/python3', '-c',
           'import sys; sys.stdout.buffer.write(%r); sys.stdout.flush(); sys.stdin.buffer.read(1)' % READY]
 
 
-def waiter_command():
+def waiter_command(reserved=False):
     """The argv that starts claude's slot waiter as a unit in claude's slice.
 
     --pipe hands the unit this process's stdin, stdout and stderr (the pipes
     and /dev/null set by Popen) and nothing else.
     """
     return ['systemd-run', '--uid=claude', '--gid=claude', f'--slice={CLAUDE_SLICE}', '--pipe', '--wait',
-            '--collect', '--quiet', '-p', 'KillMode=control-group', '--', BUILD_SLOT, *WAITER]
+            '--collect', '--quiet', '-p', 'KillMode=control-group', '--', BUILD_SLOT,
+            *(['--reserved', 'nightly'] if reserved else []), *WAITER]
 
 
-def hold(command, keep_fds=()):
+def hold(command, keep_fds=(), reserved=False):
     """Hold a slot as claude, run `command` as root, release; return its exit code.
 
     `keep_fds` are passed on to `command` only, never to claude's waiter.
     """
     print('root-slot-hold: waiting for a build slot', file=sys.stderr, flush=True)
-    waiter = subprocess.Popen(waiter_command(),
+    waiter = subprocess.Popen(waiter_command(reserved),
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               close_fds=True)
     try:
@@ -82,14 +84,17 @@ def hold(command, keep_fds=()):
 def main():
     """Check the arguments and hold the slot around them."""
     args, keep = sys.argv[1:], []
+    reserved = args[:2] == ['--reserved', 'nightly']
+    if reserved:
+        args = args[2:]
     while len(args) >= 2 and args[0] == '--keep-fd':
         if not args[1].isdigit():
             raise SystemExit('root-slot-hold: --keep-fd takes a descriptor number')
         keep.append(int(args[1]))
         args = args[2:]
-    if not args:
-        raise SystemExit('usage: root-slot-hold [--keep-fd N]... <command> [args...]')
-    return hold(args, keep)
+    if not args or args[0].startswith('--'):
+        raise SystemExit('usage: root-slot-hold [--reserved nightly] [--keep-fd N]... <command> [args...]')
+    return hold(args, keep, reserved=True) if reserved else hold(args, keep)
 
 
 if __name__ == '__main__':
