@@ -740,6 +740,18 @@ impl Install {
         ] {
             self.directory(&path, mode)?;
         }
+        // Record the cache directories before launch so an aborted up can
+        // remove the ones it created without touching an existing runtime.
+        if let Some(dir) =
+            infraternal_shim::runtime_dir::managed_macos_session_dir(&self.paths.state)
+        {
+            let product = dir.parent().ok_or(ErrorKind::InvalidInput)?;
+            let caches = product.parent().ok_or(ErrorKind::InvalidInput)?;
+            for path in [caches, product, dir.as_path()] {
+                self.directory(path, 0o700)?;
+            }
+            infraternal_shim::runtime_dir::create_session_dir(&self.paths.state)?;
+        }
         Ok(())
     }
 
@@ -1012,6 +1024,8 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
+    let session_cache =
+        infraternal_shim::runtime_dir::remove_managed_macos_session_dir(&paths.state);
     for directory in [&paths.base, &paths.logs] {
         match fs::remove_dir_all(directory) {
             Ok(()) => {}
@@ -1019,5 +1033,5 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    helper
+    helper.and(session_cache)
 }

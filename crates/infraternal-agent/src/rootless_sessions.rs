@@ -160,7 +160,7 @@ async fn cleanup(state: &Path, person: uuid::Uuid) -> io::Result<Option<io::Erro
         })
         .collect::<io::Result<Vec<_>>>()?;
     let mut failure = None;
-    for entry in fs::read_dir(state.join("sessions"))? {
+    for entry in fs::read_dir(infraternal_shim::runtime_dir::session_dir(state))? {
         let path = entry?.path();
         if path.extension().is_some_and(|ext| ext == "sock") {
             let id = path

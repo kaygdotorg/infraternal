@@ -11,6 +11,7 @@ use infraternal_shim::frame::{
     APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER,
 };
 use infraternal_shim::readiness::Registration;
+use infraternal_shim::runtime_dir::{create_session_dir, session_dir};
 #[cfg(target_os = "linux")]
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use nix::unistd::Uid;
@@ -316,7 +317,7 @@ pub fn state_path(path: Option<PathBuf>) -> io::Result<PathBuf> {
 pub fn state(path: Option<PathBuf>) -> io::Result<PathBuf> {
     let path = state_path(path)?;
     private(&path)?;
-    private(&path.join("sessions"))?;
+    create_session_dir(&path)?;
     Ok(path)
 }
 
@@ -486,9 +487,7 @@ async fn handshake(path: PathBuf, id: [u8; 16], requested: Option<u64>) -> io::R
 /// The rendezvous socket a session's shim listens on, derived from its id alone.
 #[must_use]
 pub fn rendezvous(state: &Path, id: [u8; 16]) -> PathBuf {
-    state
-        .join("sessions")
-        .join(format!("{}.sock", uuid::Uuid::from_bytes(id).simple()))
+    session_dir(state).join(format!("{}.sock", uuid::Uuid::from_bytes(id).simple()))
 }
 
 /// True when a connect to a rendezvous proves that no shim is there: the
@@ -571,7 +570,7 @@ pub fn discover(
 async fn discover_inner(state: &Path) -> io::Result<Vec<Session>> {
     let mut tasks = JoinSet::new();
     let mut sessions = Vec::new();
-    for entry in fs::read_dir(state.join("sessions"))? {
+    for entry in fs::read_dir(session_dir(state))? {
         let entry = entry?;
         let path = entry.path();
         // Markers are published only after bind. If their socket is absent,
@@ -705,7 +704,7 @@ pub(crate) struct SessionEvents(DirectoryEvents);
 impl SessionEvents {
     /// Watch `state/sessions` for entries being added or removed.
     pub(crate) fn new(state: &Path) -> io::Result<Self> {
-        DirectoryEvents::new(&state.join("sessions")).map(Self)
+        DirectoryEvents::new(&session_dir(state)).map(Self)
     }
 
     pub(crate) async fn changed(&self) -> io::Result<()> {
@@ -898,7 +897,7 @@ struct SocketReadiness(DirectoryEvents);
 impl SocketReadiness {
     /// Watch `state/sessions` for socket creation.
     fn new(state: &Path) -> io::Result<Self> {
-        DirectoryEvents::new(&state.join("sessions")).map(Self)
+        DirectoryEvents::new(&session_dir(state)).map(Self)
     }
     /// Wait for the next directory change; after a refused connect, also wake once 1 ms later (see above).
     async fn changed(&self, refused: bool) -> io::Result<()> {
@@ -1079,7 +1078,7 @@ async fn launch_configured(
     }
     let id = uuid::Uuid::new_v4();
     let name = id.simple().to_string();
-    let path = state.join("sessions").join(format!("{name}.sock"));
+    let path = session_dir(state).join(format!("{name}.sock"));
     #[cfg(target_os = "linux")]
     let mut reservation = match person {
         Some((person, guard)) => {

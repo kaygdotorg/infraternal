@@ -805,6 +805,7 @@ impl ChildSignals {
 /// Creates the session's private rendezvous socket under the runtime state
 /// directory (the configured one, the root runtime directory, or the
 /// account's private runtime directory) and returns it with its path.
+/// Bind the shim in the same private session directory the host will watch.
 fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
     let state = if let Some(path) = &config.state {
         path.clone()
@@ -822,8 +823,7 @@ fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
         runtime.join("infraternal")
     };
     private_dir(&state)?;
-    let sessions = state.join("sessions");
-    private_dir(&sessions)?;
+    let sessions = crate::runtime_dir::create_session_dir(&state)?;
     let mut id = String::with_capacity(32);
     for byte in config.session {
         let _ = write!(id, "{byte:02x}");

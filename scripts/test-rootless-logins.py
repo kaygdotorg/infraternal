@@ -28,7 +28,17 @@ def main():
     os.environ.update(XDG_RUNTIME_DIR=str(root), INFRATERNAL_TEST_RTT='0',
                       PATH=str(tools) + os.pathsep + os.environ['PATH'])
     state = root / 'state'
-    state.mkdir(mode=0o700)
+    sockets = None
+    if sys.platform == 'darwin':
+        # Exercise the installed LaunchAgent's shape inside the fixture home.
+        state = root / 'Library/Application Support/infraternal/state'
+        caches = root / 'Library/Caches'
+        caches.mkdir(mode=0o700, parents=True)
+        sockets = caches / 'infraternal/up'
+        leaf = 'a' * 32 + '.sock'
+        assert len(os.fsencode(state / 'sessions' / leaf)) >= 104
+        assert len(os.fsencode(sockets / leaf)) < 104
+    state.mkdir(mode=0o700, parents=True)
     client = None
     person = uuid.uuid4()
     account = pwd.getpwuid(os.geteuid()).pw_name
@@ -41,7 +51,9 @@ def main():
         assert opened['account'] == account
         assert opened['requested_account'] is None
         assert not opened['fallback']
-        if sys.platform == 'darwin':
+        if sockets is not None:
+            assert (sockets / (uuid.UUID(opened['session_id']).hex + '.sock')).exists()
+            assert (state / 'infraternal-login-locks').is_dir()
             assert not list((state / 'infraternal-login-locks').glob('*.terminal'))
         select_terminal(client, opened['session_id'])
         terminal_marker(client, 'rootless-ready')
@@ -53,7 +65,8 @@ def main():
         # The exited terminal can still queue a final stream Close. Use a fresh
         # leg-B fixture for the fixed readiness command, avoiding stream reuse.
         client.kill()
-        cleanup(state)
+        cleanup(state, sockets)
+        sockets = None
         state = root / 'probe'
         state.mkdir(mode=0o700)
         client = Binary(binary, state)
@@ -77,7 +90,7 @@ def main():
     finally:
         if client is not None:
             client.kill()
-        cleanup(state)
+        cleanup(state, sockets)
         shutil.rmtree(root)
 
 

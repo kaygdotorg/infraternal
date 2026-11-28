@@ -12,12 +12,12 @@
 //! for a Unix socket path. `~/Library/Caches/infraternal/sessions/<32 hex>.sock`
 //! stays inside the limit for account names up to about 20 characters.
 //!
-//! The agent and every shim call [`user_runtime_dir`], so they always agree on
-//! one place without editing the process environment.
+//! The agent and every shim share the lookup. Managed user-mode installs with
+//! an overlong state path keep their terminal sockets in the private cache [D395].
 use nix::unistd::Uid;
 use std::{
     fs, io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -39,6 +39,87 @@ pub fn user_runtime_dir() -> io::Result<PathBuf> {
     };
     check_private(&runtime)?;
     Ok(runtime)
+}
+
+/// The directory where the host and shims find session sockets and exit records.
+#[must_use]
+pub fn session_dir(state: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(dir) = managed_macos_session_dir(state) {
+        return dir;
+    }
+    state.join("sessions")
+}
+
+/// A private cache for user-mode installs whose standard state is too deep
+/// for a Unix socket. The install's other state stays in Application Support.
+/// This directory belongs only to the macOS user-mode install, so a manual
+/// infraternal agent using the ordinary runtime directory keeps its own sockets.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn managed_macos_session_dir(state: &Path) -> Option<PathBuf> {
+    let managed = Path::new("Library/Application Support/infraternal/state");
+    // Darwin's 104-byte sun_path includes the terminator. Count the separator,
+    // 32 hex characters and ".sock" in bytes, as the kernel does.
+    if Uid::effective().is_root()
+        || !state.is_absolute()
+        || !state.ends_with(managed)
+        || state.join("sessions").as_os_str().len() + 1 + 32 + 5 < 104
+    {
+        return None;
+    }
+    let home = state.ancestors().nth(managed.components().count())?;
+    Some(home.join("Library/Caches/infraternal/up"))
+}
+
+/// Create and validate the shared session directory inside the caller's own
+/// private runtime. The Mac cache hierarchy must be private at every level.
+/// # Errors
+/// Refuses unsafe directory ownership, links and filesystem errors.
+pub fn create_session_dir(state: &Path) -> io::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let Some(dir) = managed_macos_session_dir(state) {
+        let root = dir.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        let caches = root.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        check_private(caches)?;
+        create_private(root)?;
+        create_private(&dir)?;
+        return Ok(dir);
+    }
+    let dir = state.join("sessions");
+    create_private(&dir)?;
+    Ok(dir)
+}
+
+/// Create one 0700 directory or validate the one that already exists.
+fn create_private(path: &Path) -> io::Result<()> {
+    match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    check_private(path)
+}
+
+/// Remove only the managed Mac socket cache, after uninstall has stopped its
+/// LaunchAgent and authenticated the installation receipt.
+/// # Errors
+/// Refuses a nonprivate hierarchy or a filesystem failure.
+#[cfg(target_os = "macos")]
+pub fn remove_managed_macos_session_dir(state: &Path) -> io::Result<()> {
+    let Some(dir) = managed_macos_session_dir(state) else {
+        return Ok(());
+    };
+    let root = dir.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let caches = root.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    for path in [caches, root, dir.as_path()] {
+        match check_private(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+    fs::remove_dir_all(dir)
 }
 
 /// The macOS fallback: the account's own `~/Library/Caches`.
