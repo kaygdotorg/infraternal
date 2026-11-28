@@ -119,6 +119,17 @@ pub fn result(root: &Command, args: &[String], error: &clap::Error) -> CommandRe
         },
         _ => "The command line is not valid.".to_owned(),
     };
+    let text = match (error.kind(), &argument) {
+        (ErrorKind::UnknownArgument, Some(name)) => format!("Unknown option {name}."),
+        (ErrorKind::InvalidSubcommand, _) => format!("Unknown command for {shown}."),
+        (ErrorKind::InvalidValue | ErrorKind::ValueValidation, Some(name)) => {
+            format!("{name} needs a different value.")
+        }
+        (ErrorKind::ArgumentConflict, Some(name)) => {
+            format!("{name} conflicts with another option.")
+        }
+        _ => message.clone(),
+    };
     CommandResult::new(
         if path.is_empty() {
             "infraternal".to_owned()
@@ -131,6 +142,10 @@ pub fn result(root: &Command, args: &[String], error: &clap::Error) -> CommandRe
     )
     .with_argument("usage", argument)
     .with_next_step(format!("{shown} --help"))
+    .with_text_message(text)
+    .with_text_next(vec![format!(
+        "See the available options with {shown} --help."
+    )])
 }
 
 #[cfg(test)]

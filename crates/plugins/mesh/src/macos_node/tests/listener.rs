@@ -21,12 +21,12 @@ async fn prebound_wireguard_socket_keeps_the_advertised_port_on_reconfiguration(
     };
     let (send, receive) = factory.bind(&params).await.expect("prebind UDP");
     let port = send.local_addr().expect("UDP address").port();
-    let mut bound = BoundUdpFactory {
+    let mut bound = BoundUdpFactory::from_bound(
         send,
         receive,
         port,
-        admission: Arc::new(RwLock::new(PeerAdmission::new(StaticSecret::from([7; 32])))),
-    };
+        Arc::new(RwLock::new(PeerAdmission::new(StaticSecret::from([7; 32])))),
+    );
     let (reused_send, reused_receive) = bound
         .bind(&UdpTransportFactoryParams { addr: None, port })
         .await

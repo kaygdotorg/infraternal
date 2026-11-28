@@ -524,10 +524,13 @@ fn user_plan(uid: u32) -> io::Result<Plan> {
         targets.extend(helper_paths.map(str::to_owned));
         targets.extend(paths(names::managed_resolvers()?));
     }
-    let mut notes = vec![format!(
-        "If you added this PATH line, remove it from your shell configuration.\n  {}",
-        safe_text(&review.path_line)
-    )];
+    let mut notes = Vec::new();
+    if let Some(line) = review.path_line {
+        notes.push(format!(
+            "If your shell configuration includes this PATH line, remove it.\n  {}",
+            safe_text(&line)
+        ));
+    }
     if let Some(logs) = review.foreign_logs {
         notes.push(format!(
             "Keep {} because its ownership could not be verified.",

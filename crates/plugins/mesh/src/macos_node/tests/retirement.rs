@@ -89,7 +89,7 @@ fn failed_retirement_case(open_store: bool) {
         rotation_continuity: false,
     };
     let applied_configs = Arc::new(Mutex::new(Vec::new()));
-    let mut node = Node {
+    let mut node = Node::from_test_state(super::super::NodeState {
         enabled: true,
         worker: Some(recording_worker(Arc::clone(&applied_configs))),
         store,
@@ -103,7 +103,7 @@ fn failed_retirement_case(open_store: bool) {
         path: Some(state_path.clone()),
         binding: None,
         network_status: crate::macos_node::subnet::NetworkStatus::default(),
-    };
+    });
     let result = chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_B)
         .into_iter()
         .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
@@ -111,7 +111,7 @@ fn failed_retirement_case(open_store: bool) {
         .expect("read saved state")
         .expect("saved state exists");
     let runtime_configs = applied_configs.lock().expect("recorded configs").clone();
-    let stopped_after_failure = !node.enabled && node.worker.is_none();
+    let stopped_after_failure = !node.test_state().enabled && node.test_state().worker.is_none();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
         .expect("restore state directory permissions");
     node.down().expect("stop test worker");
@@ -186,7 +186,7 @@ fn mac_retirement_persists_deny_state_before_worker_fence() {
     let at_fence = Arc::new(Mutex::new(None));
     let observed = Arc::clone(&at_fence);
     let hook_path = state_path.clone();
-    let mut node = Node {
+    let mut node = Node::from_test_state(super::super::NodeState {
         enabled: true,
         worker: Some(recording_worker_with_replace_hook(
             Arc::new(Mutex::new(Vec::new())),
@@ -208,13 +208,13 @@ fn mac_retirement_persists_deny_state_before_worker_fence() {
         path: Some(state_path),
         binding: None,
         network_status: crate::macos_node::subnet::NetworkStatus::default(),
-    };
+    });
 
     // The production replacement path: persist the reset, then hand the worker the
     // complete new snapshot. Read the disk between the two steps.
     let mut replacement = current.clone();
     replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
-    node.prepare_authority_replacement(&replacement)
+    node.test_prepare_authority_replacement(&replacement)
         .expect("persist the new authority's reset");
     let saved_before_worker = read_public_state(&directory.join(PUBLIC_STATE))
         .expect("read state before the worker is told")
@@ -303,7 +303,7 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
     };
     let store = Some(store);
     let applied = Arc::new(Mutex::new(Vec::new()));
-    let mut node = Node {
+    let mut node = Node::from_test_state(super::super::NodeState {
         enabled: true,
         worker: Some(recording_worker(Arc::clone(&applied))),
         identity: Some(identity),
@@ -317,7 +317,7 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
         path: Some(state_path),
         binding: None,
         network_status: crate::macos_node::subnet::NetworkStatus::default(),
-    };
+    });
 
     let mut replacement = current.clone();
     replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
@@ -335,25 +335,22 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
             node.chunk(chunk).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+        assert!(node.test_state().config.as_ref().is_some_and(|config| {
+            config.authority_epoch.as_deref() == Some(AUTHORITY_EPOCH_B)
+                && config.peers.is_empty()
+                && config.default_policy == DefaultPolicy::Deny
+        }));
+        assert!(node.test_state().worker.is_none());
         assert!(
-            node.config
-                .as_ref()
-                .is_some_and(
-                    |config| config.authority_epoch.as_deref() == Some(AUTHORITY_EPOCH_B)
-                        && config.peers.is_empty()
-                        && config.default_policy == DefaultPolicy::Deny
-                )
-        );
-        assert!(node.worker.is_none());
-        assert!(
-            node.store
+            node.test_state()
+                .store
                 .as_ref()
                 .unwrap()
                 .rotation_secret()
                 .unwrap()
                 .is_some()
         );
-        let saved = read_public_state(node.path.as_ref().unwrap())
+        let saved = read_public_state(node.test_state().path.as_ref().unwrap())
             .unwrap()
             .unwrap();
         assert!(saved.authority_reset_pending && !saved.enabled);
@@ -362,7 +359,7 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
         fs::remove_dir_all(directory).unwrap();
         return;
     }
-    node.prepare_authority_replacement(&replacement)
+    node.test_prepare_authority_replacement(&replacement)
         .expect("persist the new authority's reset");
     if incomplete {
         let mut chunk = crate::configuration::chunks(None, &replacement)
@@ -372,7 +369,8 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
         chunk.last = false;
         assert!(!node.chunk(chunk).expect("stage the first chunk only"));
         assert!(
-            node.store
+            node.test_state()
+                .store
                 .as_ref()
                 .unwrap()
                 .rotation_secret()
@@ -388,7 +386,8 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
             std::io::ErrorKind::InvalidData
         );
         assert!(
-            node.store
+            node.test_state()
+                .store
                 .as_ref()
                 .unwrap()
                 .rotation_secret()
@@ -419,7 +418,8 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
             std::io::ErrorKind::InvalidData
         );
         assert!(
-            node.store
+            node.test_state()
+                .store
                 .as_ref()
                 .unwrap()
                 .rotation_secret()
@@ -428,18 +428,21 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
         );
     }
     let journal = node
+        .test_state()
         .store
         .as_ref()
         .expect("node store")
         .rotation_secret()
         .expect("read journal");
     let retained_key = node
+        .test_state()
         .store
         .as_ref()
         .expect("node store")
         .recorded_interface()
         .expect("read interface marker");
     let retained_private_key = node
+        .test_state()
         .store
         .as_ref()
         .expect("node store")
@@ -464,7 +467,8 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
             node.chunk(chunk).expect("accept a validated replacement");
         }
         assert!(
-            node.store
+            node.test_state()
+                .store
                 .as_ref()
                 .unwrap()
                 .rotation_secret()

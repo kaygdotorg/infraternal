@@ -304,9 +304,11 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           });
           return true;
         },
-        onSessionCreated: (id) => {
+        onSessionCreated: (id, account) => {
           this.retired = undefined;
           this.model.sessionId = id;
+          if (account) this.model.openedAccount = { sessionId: id, account };
+          else delete this.model.openedAccount;
           delete this.model.openRefused;
           this.changed();
           options.onSessionCreated?.(id);

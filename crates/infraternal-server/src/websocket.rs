@@ -3335,16 +3335,14 @@ async fn open_terminal(
     let person =
         uuid::Uuid::parse_str(user_id).map_err(|_| crate::embedded::AgentError::Rejected)?;
     #[cfg(feature = "ssh")]
-    let account = Some(
-        crate::preferred_accounts::resolve(
-            &state.pool,
-            user_id,
-            &crate::auth::hash(session_token),
-            host,
-        )
-        .await
-        .map_err(|_| crate::embedded::AgentError::Unavailable)?,
-    );
+    let account = crate::preferred_accounts::resolve(
+        &state.pool,
+        user_id,
+        &crate::auth::hash(session_token),
+        host,
+    )
+    .await
+    .map_err(|_| crate::embedded::AgentError::Unavailable)?;
     #[cfg(not(feature = "ssh"))]
     let account = None;
     // Login access (D235 Q14): the same check as mesh SSH. The host applies it

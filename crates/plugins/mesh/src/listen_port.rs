@@ -2,9 +2,12 @@
 
 use std::io;
 
-use infraternal_mesh_node::listen_port::requested;
+/// Default UDP port used by the Linux node.
+#[cfg(target_os = "linux")]
+pub(crate) use infraternal_mesh_node::listen_port::DEFAULT_PORT;
 /// Preferred port and fallback policy consumed by the host listener.
-pub(crate) use infraternal_mesh_node::listen_port::{DEFAULT_PORT, Request};
+pub(crate) use infraternal_mesh_node::listen_port::Request;
+use infraternal_mesh_node::listen_port::requested;
 
 /// Read the optional mesh UDP override and combine it with the last default-selected port.
 ///

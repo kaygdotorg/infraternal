@@ -5,6 +5,7 @@ import type { DetailsSource, HostFactsSnapshot, MeshProtectionSnapshot } from ".
 import { detailsFacts } from "../windows/details-facts";
 import { readExtendedInfo } from "../windows/extended-info";
 import type { WinRec } from "../context";
+import { windowTitle } from "../model/types";
 import type { SessionInventory } from "./inventory";
 
 /**
@@ -67,6 +68,7 @@ export function createLiveDetails(options: {
       const cacheKey = `${rec.model.id}:${factsKey(target)}`;
       const facts = snapshots.get(cacheKey);
       const server = target.kind === "server";
+      const user = windowTitle(rec.model).user ?? (server ? host.user : undefined);
       const gone = target.kind === "host" && !facts && offline.has(cacheKey);
       // Mesh status belongs to this server host; never show it for a different added host's window.
       const mesh = server ? meshStatusSnapshot : undefined;
@@ -76,8 +78,7 @@ export function createLiveDetails(options: {
         ...(target.kind !== "none" && !facts && !gone && !refusedKeys.has(cacheKey) ? { loading: true } : {}),
         host: {
           name: rec.model.host,
-          // The server's login only describes the server's own windows; an added host names its own.
-          ...(server ? (host.user ? { user: host.user } : {}) : rec.model.user ? { user: rec.model.user } : {}),
+          ...(user ? { user } : {}),
           ...(facts ? { os: hostPlatformFromOs(facts.os) } : !server && rec.model.os ? { os: rec.model.os } : {}),
           // The page's own hostname is the server's address; an added host is reached by the address it was added with.
           ...(server ? { address: location.hostname, reach: "Directly, over this connection" } : { ...(rec.model.address ? { address: rec.model.address } : {}), reach: "Through this server" }),

@@ -86,7 +86,7 @@ static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 /// their existing resolver unchanged.
 /// macOS writes one managed `/etc/resolver` file per suffix only when root.
 #[derive(Default)]
-pub(crate) struct DnsIntegration {
+pub struct DnsIntegration {
     /// The last setup failure, shown by `mesh status` until a later attempt succeeds.
     last_error: Option<String>,
     /// Set when the process lacked the authority to touch system resolver files.

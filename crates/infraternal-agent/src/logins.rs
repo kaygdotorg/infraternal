@@ -16,12 +16,14 @@ use tokio::{
 
 /// Why a rootless host refused a login. A root host never produces either: it switches accounts, or falls back to
 /// root when the person has none. The browser must tell these apart from every other `PermissionDenied` (a revoked
-/// person, a worker owned by another account), because only these two mean "this server runs without root" (#327).
+/// person, a worker owned by another account), so the window can explain the host's account limitation (#327).
 /// The error carries a type so the daemon never matches on message text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RootlessRefusal {
     /// The person's name is no account here, and a rootless host cannot fall back to root.
     NoMatchingLogin,
+    /// The enrolled UID no longer names an account on this host.
+    ExecutionAccountMissing(u32),
     /// The account exists but is not the one this infraternal agent runs as.
     OtherAccount,
 }
@@ -30,6 +32,7 @@ impl std::fmt::Display for RootlessRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::NoMatchingLogin => "preferred account is absent on a rootless host",
+            Self::ExecutionAccountMissing(_) => "enrolled account is absent on a rootless host",
             Self::OtherAccount => "rootless host cannot change account",
         })
     }
@@ -38,7 +41,8 @@ impl std::fmt::Display for RootlessRefusal {
 impl std::error::Error for RootlessRefusal {}
 
 impl RootlessRefusal {
-    fn denied(self) -> io::Error {
+    /// Preserve the typed reason through the login path.
+    pub(crate) fn denied(self) -> io::Error {
         io::Error::new(io::ErrorKind::PermissionDenied, self)
     }
 

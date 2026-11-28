@@ -27,7 +27,7 @@ use std::{
 /// What happened to each network the applied snapshot lets this Mac reach, shared by the worker
 /// (which writes it after every reconcile) and the node (which reads it for `mesh routes`).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct NetworkStatus(Arc<Mutex<BTreeMap<Network, RouteState>>>);
+pub struct NetworkStatus(Arc<Mutex<BTreeMap<Network, RouteState>>>);
 
 impl NetworkStatus {
     /// The status of one network as `mesh routes` shows it; `pending` before the first reconcile.
@@ -55,21 +55,22 @@ impl NetworkStatus {
 /// One wanted network and, in root mode, the path MTU of the router peer that carries it.
 type Wanted = Vec<(Network, Option<u16>)>;
 
-impl RuntimeState {
-    /// Apply subnet routes after a snapshot, reusing authenticated endpoints for peers that
-    /// kept their sessions.
-    pub(super) async fn sync_networks(&mut self) {
-        self.reconcile_networks(None).await;
-    }
+/// Mac-specific network route reconciliation for the shared runtime.
+pub(super) trait RuntimeNetworks {
+    /// Apply routes when a snapshot or matching endpoint changes.
+    async fn reconcile_networks(&mut self, confirmed: Option<&[(PublicKey, SocketAddr)]>) -> bool;
+    /// Derive the routes desired by the snapshot.
+    fn wanted_networks(&self, config: &Config) -> Wanted;
+    /// Remove all subnet routes at shutdown.
+    fn remove_networks(&mut self);
+}
 
+impl RuntimeNetworks for RuntimeState {
     /// Reconcile the utun's routes only when a snapshot or a matching endpoint IP changed.
     /// Root mode and the helper both see only prefixes the tunnel is allowed to carry. A
     /// withdrawn prefix is removed first, so even a partial add leaves the endpoint outside it.
     /// Snapshots pass `None` and read the engine only if there are routes to reconcile.
-    pub(super) async fn reconcile_networks(
-        &mut self,
-        confirmed: Option<&[(PublicKey, SocketAddr)]>,
-    ) -> bool {
+    async fn reconcile_networks(&mut self, confirmed: Option<&[(PublicKey, SocketAddr)]>) -> bool {
         let Some(config) = self.config.as_ref() else {
             return false;
         };
@@ -239,7 +240,7 @@ impl RuntimeState {
 
     /// Take every subnet route off the utun before it closes (root mode runs `route` itself;
     /// in user mode the routes go with the utun) and clear the published status.
-    pub(super) fn remove_networks(&mut self) {
+    fn remove_networks(&mut self) {
         self.subnet_exceptions.clear();
         self.admitted_networks.clear();
         let networks = std::mem::take(&mut self.networks);
@@ -253,11 +254,6 @@ impl RuntimeState {
             }
         }
         self.network_status.clear();
-    }
-
-    /// The networks routed into the utun now, for the candidate walks.
-    pub(super) fn installed_networks(&self) -> BTreeSet<Network> {
-        self.networks.keys().copied().collect()
     }
 }
 

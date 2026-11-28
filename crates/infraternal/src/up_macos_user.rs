@@ -29,8 +29,9 @@
 
 use super::{
     Failure, JoinMode, SUDO_CANDIDATES, approval_display_is_terminal, fail, join_approval_link,
-    local_hostname, machine_key_short, machine_start_body, map_remote_failure, needs_terminal,
-    print_approval, server_url, start_approval, take_join_key, trusted_tool, wait_for_approval,
+    joined_message, local_hostname, machine_key_short, machine_start_body, map_remote_failure,
+    needs_terminal, print_approval, server_url, start_approval, take_join_key, trusted_tool,
+    wait_for_approval,
 };
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
@@ -46,7 +47,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, ErrorKind, Read},
+    io::{self, ErrorKind, IsTerminal, Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
@@ -64,6 +65,8 @@ const LAUNCHCTL: &str = "/bin/launchctl";
 
 /// Where one person's user-mode install lives (D395).
 pub(super) struct Paths {
+    /// The account home from the user database.
+    home: PathBuf,
     /// `~/Library/Application Support/infraternal`.
     base: PathBuf,
     /// The enrollment directory.
@@ -98,6 +101,7 @@ impl Paths {
             legacy_launch_agent: library
                 .join(format!("LaunchAgents/{}.plist", legacy::AGENT_LABEL)),
             base,
+            home,
         })
     }
 
@@ -105,24 +109,114 @@ impl Paths {
     fn receipt(&self) -> PathBuf {
         self.base.join(macos_user_mode::USER_RECEIPT)
     }
-
     /// The private staging namespace for a stopped user installation.
     fn removal_directory(&self) -> PathBuf {
         self.base.with_file_name(".infraternal-user-removal")
     }
+}
 
-    /// The `PATH` line `up` prints, since a per-user Mac install adds no link (D395).
-    fn path_line(&self) -> String {
-        format!(
-            "export PATH=\"{}:$PATH\"",
-            self.binary
-                .parent()
-                .unwrap_or(&self.base)
-                .display()
-                .to_string()
-                .replace('"', "\\\"")
-        )
+/// Add the installed command to future interactive zsh sessions if the user agrees.
+fn offer_path(paths: &Paths) {
+    let Some(directory) = paths.binary.parent() else {
+        return;
+    };
+    if env::var_os("PATH")
+        .is_some_and(|path| env::split_paths(&path).any(|entry| entry == directory))
+    {
+        return;
     }
+    let Some(shell) = env::var_os("SHELL") else {
+        return;
+    };
+    // Do not claim to configure another shell or guess which startup file it reads.
+    if Path::new(&shell)
+        .file_name()
+        .is_none_or(|name| name != "zsh")
+    {
+        return;
+    }
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return;
+    }
+    let config_dir = env::var_os("ZDOTDIR")
+        .filter(|value| !value.is_empty())
+        .map_or_else(
+            || Some(paths.home.clone()),
+            |value| {
+                let path = PathBuf::from(value);
+                path.is_absolute().then_some(path)
+            },
+        );
+    let Some(config_dir) = config_dir else {
+        return;
+    };
+    let config = config_dir.join(".zshrc");
+    let mut stderr = io::stderr().lock();
+    let prompt = "Add infraternal to PATH for new zsh sessions? [y/N] ";
+    if write!(stderr, "\n{prompt}")
+        .and_then(|()| stderr.flush())
+        .is_err()
+    {
+        return;
+    }
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+    {
+        match add_to_zsh_path(&config, directory) {
+            Ok(()) => {
+                let _ = writeln!(stderr, "Open a new terminal to run infraternal.");
+            }
+            Err(_) => {
+                let _ = writeln!(
+                    stderr,
+                    "Couldn't update .zshrc. Run infraternal using the full path shown above."
+                );
+            }
+        }
+    }
+}
+
+/// Append one shell-safe PATH line. Refuse special files, links and other users' files.
+fn add_to_zsh_path(config: &Path, directory: &Path) -> io::Result<()> {
+    /// Bound the read before scanning for the existing entry.
+    const LIMIT: usize = 1024 * 1024;
+    let line = zsh_path_line(directory)?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(config)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != nix::unistd::Uid::current().as_raw() {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    file.lock()?;
+    let mut previous = String::new();
+    (&file)
+        .take(LIMIT as u64 + 1)
+        .read_to_string(&mut previous)?;
+    if previous.len() > LIMIT {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    if !previous.lines().any(|existing| existing == line) {
+        writeln!(&file, "\n{line}")?;
+    }
+    Ok(())
+}
+
+/// Render the entry used by the installer and the uninstall preview.
+fn zsh_path_line(directory: &Path) -> io::Result<String> {
+    let directory = directory
+        .to_str()
+        .filter(|path| !path.contains(['\n', '\r', ':']))
+        .ok_or(ErrorKind::InvalidInput)?;
+    Ok(format!(
+        "export PATH='{}':\"$PATH\"",
+        directory.replace('\'', "'\\''")
+    ))
 }
 
 /// Whether a path exists, without following a final link.
@@ -261,8 +355,7 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
             install.committed = true;
             let paths = &install.paths;
             let local_network = wait_for_local_network(&paths.state);
-            let path_line = paths.path_line();
-            emit(
+            let result = emit(
                 CommandResult::new(
                     "up",
                     CommandState::Ready,
@@ -279,13 +372,18 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
                         "local_network": local_network.map(LocalNetwork::word),
                     }),
                 )
+                .with_text_message(joined_message(&hostname))
                 .with_body(format!(
-                    "Mac joined as {hostname} (user mode).\nService: active ({AGENT_LABEL})\nCommand: {}\nAdd it to your PATH:\n  {path_line}",
+                    "Server   {origin}\nMode     Runs while you're signed in to this Mac\nCommand  {}",
                     paths.binary.display()
                 )),
                 json_output,
                 Exit::Ok,
-            )
+            );
+            if !json_output {
+                offer_path(paths);
+            }
+            result
         }
         Err(failure) => fail(json_output, failure),
     }
@@ -327,7 +425,7 @@ fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
         return first;
     }
     eprintln!(
-        "macOS asks whether infraternal may find devices on your local network. Click Allow, so this Mac reaches mesh peers on the same network directly. Waiting up to {} seconds…",
+        "Click Allow in the macOS Local Network prompt to connect directly to nearby mesh machines. Waiting up to {} seconds.",
         LOCAL_NETWORK_WAIT.as_secs()
     );
     let last = poll(Instant::now() + LOCAL_NETWORK_WAIT, &|state| {
@@ -337,7 +435,7 @@ fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
         eprintln!("Local Network access allowed.");
     } else {
         eprintln!(
-            "Local Network access is not allowed yet. Peers on other networks work; to reach peers on this network, turn on infraternal under System Settings > Privacy & Security > Local Network. No restart is needed."
+            "Local Network access is off. To connect directly to nearby mesh machines, turn on infraternal in System Settings > Privacy & Security > Local Network."
         );
     }
     last
@@ -746,6 +844,15 @@ impl Install {
         ] {
             self.directory(&path, mode)?;
         }
+        // Rollback owns a newly created socket directory. Its shared cache
+        // parents can also serve a manually started infraternal agent.
+        if infraternal_shim::runtime_dir::managed_macos_session_dir(&self.paths.state).is_some() {
+            let (dir, created) =
+                infraternal_shim::runtime_dir::create_session_dir(&self.paths.state)?;
+            if created {
+                self.created.push(dir);
+            }
+        }
         Ok(())
     }
 
@@ -995,26 +1102,34 @@ pub(crate) struct UninstallReview {
     pub foreign_logs: Option<PathBuf>,
     /// A renamed installation has already stopped and released its shared paths.
     pub retired: Option<PathBuf>,
-    /// Shell configuration line displayed by `up` for manual setup.
-    pub path_line: String,
+    /// Unmarked shell configuration line that may still point at this install.
+    pub path_line: Option<String>,
 }
 
 /// Discover the user job from the same `LaunchAgent` paths as status.
 pub(crate) fn review_uninstall(uid: u32) -> io::Result<UninstallReview> {
     let paths = Paths::for_uid(uid)?;
+    let path_line = paths
+        .binary
+        .parent()
+        .and_then(|directory| zsh_path_line(directory).ok());
     let host = match read_uninstall_receipt(&paths, uid) {
         Ok(host) => host,
         Err(error) if error.kind() == ErrorKind::NotFound && !exists(&paths.base)? => {
             let (host, retired) = review_retired_user(&paths, uid)?;
+            let mut targets = vec![retired.clone()];
+            targets.extend(
+                infraternal_shim::runtime_dir::review_managed_macos_session_dir(&paths.state)?,
+            );
             return Ok(UninstallReview {
                 host,
                 base: paths.base.clone(),
                 data: paths.data.clone(),
-                paths: vec![retired.clone()],
+                paths: targets,
                 helper: false,
                 foreign_logs: None,
                 retired: Some(retired),
-                path_line: paths.path_line(),
+                path_line,
             });
         }
         Err(error) => return Err(error),
@@ -1022,6 +1137,7 @@ pub(crate) fn review_uninstall(uid: u32) -> io::Result<UninstallReview> {
     let mut targets = checked_uninstall_paths(&paths, uid)?;
     let helper = macos_helper::registration_for_current_user()?;
     targets.push(paths.base.clone());
+    targets.extend(infraternal_shim::runtime_dir::review_managed_macos_session_dir(&paths.state)?);
     let foreign_logs = match checked_logs(&paths.logs, uid) {
         Ok(true) => {
             targets.push(paths.logs.clone());
@@ -1039,7 +1155,7 @@ pub(crate) fn review_uninstall(uid: u32) -> io::Result<UninstallReview> {
         helper,
         foreign_logs,
         retired: None,
-        path_line: paths.path_line(),
+        path_line,
     })
 }
 
@@ -1169,6 +1285,7 @@ fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Resul
         if recorded != host {
             return Err(ErrorKind::PermissionDenied.into());
         }
+        infraternal_shim::runtime_dir::remove_managed_macos_session_dir(&paths.state)?;
         return delete_retired_user(&retired, &paths.removal_directory());
     }
     if read_uninstall_receipt(paths, uid)? != host {
@@ -1217,6 +1334,7 @@ fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Resul
             Err(error) => return Err(error),
         }
     }
+    infraternal_shim::runtime_dir::remove_managed_macos_session_dir(&paths.state)?;
     let mut left = Vec::new();
     match checked_logs(&paths.logs, uid) {
         Ok(true) => {
@@ -1232,8 +1350,9 @@ fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Resul
         }
         Err(error) => return Err(error),
     }
-    // Move the full install first. A retry can find the renamed directory by
-    // host even if the receipt was already removed by its directory walk.
+    // Move the full install (including state/infraternal-login-locks and its terminal
+    // reservations) after releasing the socket cache. A retry can find the renamed
+    // directory by host even if the receipt has already been removed.
     let directory = paths.removal_directory();
     match fs::DirBuilder::new().mode(0o700).create(&directory) {
         Ok(()) => {}
@@ -1301,6 +1420,7 @@ mod uninstall_tests {
         let root = env::temp_dir().join(format!("infraternal-uninstall-{}", uuid::Uuid::new_v4()));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         let paths = Paths {
+            home: root.clone(),
             base: root.clone(),
             binary: root.join("bin/infraternal"),
             data: root.join("agent"),
